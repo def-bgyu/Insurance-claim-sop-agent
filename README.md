@@ -92,15 +92,7 @@ Conversations are kept in memory, so a restart or redeploy resets the in-memory.
   (`apps/insurance_claims/fixtures/`). They check specific people and claims, such
   as Margaret Chen and CL-2048, so they will fail if the fixtures are replaced. The
   app itself reads whatever data is in those files.
-- **Other data with the same shape works.** Claim statuses, claim types and ID
-  formats (e.g. `CASE-A7X9`, an `approved` status, a `travel` claim) are learned
-  from the loaded fixtures rather than assumed. The sample-message buttons in the UI
-  are shortcuts for the provided demo data; with other data, type the caller's
-  details instead.
-- **Names are matched in Latin script.** Accents, punctuation, middle names or
-  initials, and reversed order are handled; names in other scripts (e.g. 王 小明)
-  can't be used as an identity field, but the caller can verify with any three of
-  the other four.
+
 
 ## More
 
