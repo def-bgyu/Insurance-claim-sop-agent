@@ -41,7 +41,7 @@ def mask_value(field: IdentityField, value: str) -> str:
 
 
 def mask_text(text: str) -> str:
-    """Best-effort masking of PII inside free text (caller messages, raw LLM output)."""
+
     text = _EMAIL.sub(r"\1***\2", text)
     text = _ISO_DATE.sub(r"\1-**-**", text)
     text = _US_DATE.sub(r"**/**/\1", text)

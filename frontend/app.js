@@ -24,11 +24,6 @@ async function api(path, options = {}) {
 
 async function loadConfig() {
   const config = await api("/api/config");
-  const select = $("#model");
-  for (const model of config.models) {
-    const option = new Option(model, model, model === config.default_model, model === config.default_model);
-    select.add(option);
-  }
   if (config.server_has_api_key) {
     $("#api-key").placeholder = "Using server key (optional override)";
   }
@@ -220,7 +215,7 @@ async function startSession(event) {
   try {
     const data = await api("/api/session", {
       method: "POST",
-      body: JSON.stringify({ api_key: $("#api-key").value || null, model: $("#model").value }),
+      body: JSON.stringify({ api_key: $("#api-key").value || null }),
     });
     sessionId = data.session_id;
     traces = [];

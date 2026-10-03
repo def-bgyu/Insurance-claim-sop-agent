@@ -5,6 +5,14 @@ inspected (`git show <commit>`) or rolled back (`git revert <commit>`).
 
 ---
 
+## 0.6.2: Model dropdown removed from the UI
+
+The app uses one model, Claude Haiku 4.5 (requested by Nidhi). The model dropdown
+is removed from the test UI and the UI no longer sends a model; the backend
+default (`claude-haiku-4-5`) is used for every session. Backend unchanged.
+
+---
+
 ## 0.6.1: Masking moved into the trace module
 
 Refactor, no behavior change (requested by Nidhi). `mask_value` and `mask_text`
