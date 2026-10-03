@@ -158,6 +158,38 @@ def emotion_violations(reply: str, plan: ResponsePlan) -> list[str]:
     return violations
 
 
+def echo_violations(reply: str, plan: ResponsePlan) -> list[str]:
+    """The reply repeats an identity value the caller gave (SSN digits, DOB, phone, email)."""
+    reply_digits = re.sub(r"\D", "", reply)
+    for value in plan.secret_values:
+        digits = re.sub(r"\D", "", value)
+        if "@" in value and value.lower() in reply.lower():
+            return ["repeats an identity value"]
+        if len(digits) >= 9 and digits in reply_digits:  # full SSN or phone, any formatting
+            return ["repeats an identity value"]
+        if len(digits) >= 4 and re.search(rf"(?<!\d){re.escape(value)}(?!\d)", reply):
+            return ["repeats an identity value"]
+    return []
+
+
+# Claiming verification or progress while the caller is not verified (live test:
+# "You're right… I have what I need. Let me verify your information and pull up your
+# claim details now." while still unverified).
+_PROGRESS_CLAIM = re.compile(
+    r"\b(?:(?:i've|i have)\s+(?:now\s+)?verified|(?:you're|you are|you've been|you have been)\s+(?:now\s+)?verified|"
+    r"identity (?:is|has been) (?:now\s+)?(?:verified|confirmed)|i have what i need|"
+    r"(?:let me|i'll|i will|i'm going to)\s+(?:now\s+|go ahead and\s+)?(?:verify|pull up|access)|"
+    r"pull(?:ing)? up your (?:claim|account|details))\b",
+    re.IGNORECASE,
+)
+
+
+def progress_violations(reply: str, plan: ResponsePlan) -> list[str]:
+    if not plan.caller_verified and _PROGRESS_CLAIM.search(reply) and not _PROGRESS_CLAIM.search(plan.fallback_text):
+        return ["claims verification or progress that didn't happen"]
+    return []
+
+
 def address_violations(reply: str, plan: ResponsePlan) -> list[str]:
     """Using a name to address the caller: "Thanks, Margaret." / "Margaret, I…"."""
     violations = []
@@ -199,9 +231,21 @@ def _retry_note(violations: list[str], plan: ResponsePlan) -> str | None:
         )
     if "missing apology" in violations:
         notes.append("Begin with a brief, sincere apology for their experience.")
+    if "repeats an identity value" in violations:
+        notes.append(
+            "Your previous draft repeated the caller's personal details back to them; never "
+            "repeat SSN digits, dates of birth, phone numbers or email addresses."
+        )
+    if "claims verification or progress that didn't happen" in violations:
+        notes.append(
+            "The caller is NOT verified yet. Do not say they are verified, that you have what "
+            "you need, or that you are looking anything up."
+        )
     retryable = (
         len(names) + len(addressed)
         + ("unprompted emotion talk" in violations) + ("missing apology" in violations)
+        + ("repeats an identity value" in violations)
+        + ("claims verification or progress that didn't happen" in violations)
     )
     if not notes or retryable != len(violations):
         return None
@@ -226,7 +270,8 @@ def _generate(
     violations = (
         grounding_violations(body, plan) + action_violations(body, plan)
         + name_violations(body, plan) + address_violations(body, plan)
-        + emotion_violations(body, plan)
+        + emotion_violations(body, plan) + echo_violations(body, plan)
+        + progress_violations(body, plan)
     )
     return body, result, violations
 

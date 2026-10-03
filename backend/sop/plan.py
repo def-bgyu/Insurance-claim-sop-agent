@@ -52,3 +52,7 @@ class ResponsePlan:
     # Claim-ID format from the loaded data (e.g. CL-2048, CASE-A7X9), so the grounding
     # guard recognizes an invented ID in whatever format the data uses.
     claim_id_pattern: re.Pattern | None = None
+    # Identity values the caller gave (SSN digits, DOB, phone, email). A reply must never
+    # repeat them back (live test: "…so just 4472…").
+    secret_values: list[str] = field(default_factory=list)
+    caller_verified: bool = False  # while False, the reply may not claim verification/progress

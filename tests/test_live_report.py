@@ -35,8 +35,75 @@ def test_f1_full_ssn_is_discarded_even_if_the_model_extracts_the_last_four():
     r = results[0]
     assert not state.verified and state.phase == Phase.VERIFY_ID
     assert F.ID_LAST4 not in state.identity
-    assert "never share a full SSN" in r.reply
+    assert "please don't share your full SSN" in r.reply
+    assert r.reply.endswith("Could you please type just the last four digits of your SSN or national ID?")
     assert "full SSN/ID given: discarded" in r.trace["plan"]["reasons"]
+
+
+# --- Live follow-up: the full-SSN conversation from the deployed demo -----------------
+
+DEMO_FULL_SSN = (
+    "I'm the policyholder. My name is Margaret Chen, policy POL-9921. I'm calling about my "
+    "denied healthcare claim from January. DOB is 1985-03-15, SSN last four is 223-46-4472."
+)
+
+
+def test_pushback_keeps_the_rule_and_retyped_digits_verify():
+    state, results, _ = run(
+        [
+            {**MARGARET_EXTRACTION, "id_last4": "4472"},  # the model pulls "4472" out again
+            {"emotion": "frustrated"},
+            {},  # the model misses a bare "4472"; code reads it as the requested last four
+        ],
+        [DEMO_FULL_SSN, "You have my last 4 digit of SSN i just have you the whole thing", "4472"],
+    )
+    first, pushback, retyped = results
+    assert first.trace["plan"]["action"] == "full_id_rejected"
+    assert pushback.trace["plan"]["action"] == "full_id_rejected"
+    assert pushback.reply.startswith("I understand. For your security, I can't use digits taken from a full SSN")
+    assert not pushback.trace["state"]["verified"]
+    # Retyped on their own, the last four count, and the remembered claim is confirmed.
+    assert state.verified and retyped.trace["plan"]["action"] == "confirm_claim"
+
+
+def test_reply_never_repeats_identity_values():
+    _, results, _ = run(
+        [{**MARGARET_EXTRACTION, "id_last4": "4472"}],
+        [DEMO_FULL_SSN],
+        reply=[
+            "For your security, please only share the last four digits, so just 4472.",
+            "For your security, please only share the last four digits of your SSN.",
+        ],
+    )
+    r = results[0]
+    assert "repeats an identity value" in r.trace["response"]["guard_violations"]
+    assert r.trace["response"]["retried"] and "4472" not in r.reply
+
+
+def test_discarded_digits_are_not_echoed_on_later_turns_either():
+    _, results, _ = run(
+        [{**MARGARET_EXTRACTION, "id_last4": "4472"}, {"emotion": "frustrated"}],
+        [DEMO_FULL_SSN, "You have my last 4 digit of SSN i just have you the whole thing"],
+        reply=["Please retype the last four.", "I know you said 4472, but please retype it.", "Please retype it."],
+    )
+    later = results[1]
+    assert "repeats an identity value" in later.trace["response"]["guard_violations"]
+    assert "4472" not in later.reply and "4472" not in json.dumps(later.trace)
+
+
+def test_reply_cannot_claim_verification_that_did_not_happen():
+    state, results, _ = run(
+        [{**MARGARET_EXTRACTION, "id_last4": "4472"}, {"emotion": "frustrated"}],
+        [DEMO_FULL_SSN, "You have my last 4 digit of SSN i just have you the whole thing"],
+        reply=[
+            "Please retype just the last four digits.",
+            "You're right, my apologies. I have what I need. Let me verify your information and pull up your claim details now.",
+            "You're right that you shared it. For your security I can't use it from the full number.",
+        ],
+    )
+    r = results[1]
+    assert "claims verification or progress that didn't happen" in r.trace["response"]["guard_violations"]
+    assert "I have what I need" not in r.reply and not state.verified
 
 
 # --- F2: traces never contain identity values -----------------------------------------

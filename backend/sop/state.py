@@ -81,6 +81,11 @@ class SessionState(BaseModel):
     # Identity: normalized values the caller has given us (never echoed back raw).
     identity: dict[IdentityField, str] = Field(default_factory=dict)
     verified_party_id: str | None = None
+    # A full SSN/ID was rejected and the caller still owes the last four, typed on their own.
+    full_id_rejected: bool = False
+    # Last four of the rejected full number: never used for verification or shown
+    # anywhere; kept only so replies can't echo them and traces mask them on later turns.
+    rejected_id_digits: str | None = None
     names_mentioned: list[str] = Field(default_factory=list)  # every name the caller gave
     caller_role: str = "policyholder"  # "policyholder" | "representative"
     representative_name: str | None = None

@@ -22,7 +22,7 @@ from datetime import date
 from backend import config
 from backend.data import Claim, InsuranceData, get_data
 from backend.llm import prompts
-from backend.llm.extractor import Emotion, Extraction, YesNo, extract
+from backend.llm.extractor import FULL_SSN, Emotion, Extraction, YesNo, extract
 from backend.llm.provider import LLMProvider
 from backend.llm.responder import respond
 from backend.sop import case_resolution, grounding
@@ -156,7 +156,7 @@ class SOPEngine:
         # The question this reply ends with is the one the next yes/no answers.
         state.pending_question = plan.pending_question
         self._apply_name_policy(state, plan)
-        plan.claim_id_pattern = self.data.vocabulary.claim_id_re
+        self._apply_reply_checks(state, plan, outcome, user_text)
 
         response = respond(self.provider, state, plan)
         state.transcript.append(Turn(role="agent", text=response.text, phase=state.phase))
@@ -188,6 +188,19 @@ class SOPEngine:
                 state.caller_role = "representative"
             if ex.representative_name:
                 state.representative_name = ex.representative_name
+
+    def _apply_reply_checks(self, state: SessionState, plan: ResponsePlan, outcome, user_text: str) -> None:
+        """What the reply guards need: the data's claim-ID format, the identity values
+        that must never be repeated back, and whether the caller is verified."""
+        plan.claim_id_pattern = self.data.vocabulary.claim_id_re
+        plan.caller_verified = state.verified
+        known = self._known_identity(state, outcome)
+        secrets = {v for field, values in known.items() if field != IdentityField.FULL_NAME for v in values}
+        # A full SSN must not be echoed either: neither the whole number nor its last four
+        # (which the code discarded, so they aren't in the identity values above).
+        for full in FULL_SSN.findall(user_text):
+            secrets |= {full, re.sub(r"\D", "", full)[-4:]}
+        plan.secret_values = sorted(secrets)
 
     def _apply_name_policy(self, state: SessionState, plan: ResponsePlan) -> None:
         """Before verification: no names (any name typed is unconfirmed). After: only the
@@ -490,7 +503,7 @@ class SOPEngine:
 
     def _phase_plan(self, state: SessionState, ex: Extraction, user_text: str) -> ResponsePlan:
         if state.phase == Phase.VERIFY_ID:
-            return self._verify(state, ex)
+            return self._verify(state, ex, user_text)
         if state.phase == Phase.RESOLVE_INTENT:
             return self._resolve(state, ex, user_text)
         if state.phase == Phase.PROCESS_CASE:
@@ -538,11 +551,16 @@ class SOPEngine:
             return f"Could you please share your {_join_or(labels)}?"
         return f"Could you please share {needed} more of the following: your {_join_or(labels)}?"
 
-    def _verify(self, state: SessionState, ex: Extraction) -> ResponsePlan:
+    def _verify(self, state: SessionState, ex: Extraction, user_text: str = "") -> ResponsePlan:
         if state.consent.status == "pending":
             return self._consent_waiting(state, ex)
         if state.consent.status in ("denied", "no_response"):
             return self._consent_failed(state, ex)
+
+        # After a full SSN was rejected we asked for the last four on their own, so a
+        # message that is just four digits is that answer, even if the model missed it.
+        if state.full_id_rejected and not ex.id_last4 and re.fullmatch(r"\s*\d{4}\s*\.?\s*", user_text):
+            ex.id_last4 = user_text.strip(" .")
 
         changed, unreadable = False, []
         for field in IDENTITY_FIELDS:
@@ -558,6 +576,12 @@ class SOPEngine:
 
         result = verify_identity(state.identity, self.data.identity_records())
         reasons = [f"identity fields provided: {len(state.identity)}"]
+        if ex.full_id_given:
+            state.full_id_rejected = True
+            if m := FULL_SSN.search(user_text):
+                state.rejected_id_digits = re.sub(r"\D", "", m.group(0))[-4:]
+        if IdentityField.ID_LAST4 in state.identity:
+            state.full_id_rejected = False
 
         if result.verified:
             if state.caller_role == "representative":
@@ -594,6 +618,30 @@ class SOPEngine:
                 "SSN or ID number; only the last four digits are needed. "
             )
             reasons.append("full SSN/ID given: discarded")
+
+        # The caller owes the last four, retyped on their own. Unless a real verification
+        # attempt just failed (handled below), keep asking for exactly that, and stay
+        # calm and firm if they push back ("you already have it").
+        failed_attempt = result.evaluated and changed
+        if state.full_id_rejected and not failed_attempt and (ex.full_id_given or not changed):
+            first = ex.full_id_given
+            text = (
+                "For your security, please don't share your full SSN. I'm not able to use digits "
+                "taken from a full number, so I'll need you to retype just the last four digits."
+                if first else
+                "I understand. For your security, I can't use digits taken from a full SSN, so "
+                "I'll need you to retype just the last four digits."
+            )
+            return ResponsePlan(
+                action="full_id_rejected",
+                directive=(
+                    f"{tone}{noted}Convey this in your own words: \"{text}\" Do NOT repeat any "
+                    "digits, and do not say you have their SSN or ID digits."
+                ),
+                fallback_text=text,
+                closing_question="Could you please type just the last four digits of your SSN or national ID?",
+                reasons=reasons + ["waiting for the last four, retyped"],
+            )
         unreadable_note = ""
         if unreadable:
             # Plain wording: "could not be read" made the model talk about reading an ID
@@ -759,7 +807,7 @@ class SOPEngine:
 
         state.pending_question = plan.pending_question
         self._apply_name_policy(state, plan)
-        plan.claim_id_pattern = self.data.vocabulary.claim_id_re
+        self._apply_reply_checks(state, plan, None, "")
         response = respond(self.provider, state, plan)
         state.transcript.append(Turn(role="agent", text=response.text, phase=state.phase))
 
@@ -1136,6 +1184,8 @@ class SOPEngine:
         known: dict[IdentityField, set[str]] = {f: set() for f in IdentityField}
         for field, value in state.identity.items():
             known[field].add(value)
+        if state.rejected_id_digits:
+            known[IdentityField.ID_LAST4].add(state.rejected_id_digits)
         if outcome is not None:
             for field in IdentityField:
                 if raw := getattr(outcome.extraction, field.value):
