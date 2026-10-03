@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Claims SOP Agent</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">◆</span>
+      <div>
+        <h1>Claims SOP Agent</h1>
+        <p class="subtitle">Test console: chat with the agent and watch the SOP harness work</p>
+      </div>
+    </div>
+    <form id="setup" class="setup" autocomplete="off">
+      <label class="field">
+        <span>Anthropic API key</span>
+        <input id="api-key" type="password" placeholder="sk-ant-…" spellcheck="false">
+      </label>
+      <label class="field">
+        <span>Model</span>
+        <select id="model"></select>
+      </label>
+      <button type="submit" class="btn primary" id="start-btn">Start conversation</button>
+    </form>
+  </header>
+
+  <nav class="stepper" aria-label="SOP phase">
+    <ol id="phases">
+      <li data-phase="VERIFY_ID"><span class="dot"></span>Verify ID</li>
+      <li data-phase="RESOLVE_INTENT"><span class="dot"></span>Resolve intent</li>
+      <li data-phase="PROCESS_CASE"><span class="dot"></span>Process case</li>
+      <li data-phase="POST_PROCESS"><span class="dot"></span>Post-process</li>
+    </ol>
+    <span id="terminal-badge" class="badge hidden"></span>
+  </nav>
+
+  <main class="layout">
+    <section class="chat card" aria-label="Conversation">
+      <div id="banner" class="banner hidden" role="status"></div>
+      <div id="messages" class="messages" aria-live="polite">
+        <div class="empty">
+          <p><strong>Start a conversation</strong> to talk to the agent.</p>
+          <p class="muted">Paste your API key above (or set <code>ANTHROPIC_API_KEY</code> on the server), then click <strong>Start conversation</strong>. The chat box unlocks once the agent greets you.</p>
+        </div>
+      </div>
+
+      <div class="chips" id="chips" aria-label="Sample caller messages">
+        <span class="muted small">Try:</span>
+        <button type="button" class="chip" data-text="I'm the policyholder. My name is Margaret Chen, policy POL-9921. I'm calling about my denied healthcare claim from January. DOB is 1985-03-15, SSN last four is 4472.">Margaret (demo case)</button>
+        <button type="button" class="chip" data-text="I already told you who I am. This is ridiculous. Just tell me why my claim was denied.">Frustrated caller</button>
+        <button type="button" class="chip" data-text="What is RL?">Off-topic</button>
+        <button type="button" class="chip" data-text="Hi, I'm David Chen calling for my mother Margaret Chen. Her DOB is 1985-03-15 and her SSN last four is 4472.">Representative</button>
+      </div>
+
+      <form id="composer" class="composer">
+        <textarea id="input" rows="2" placeholder="Click “Start conversation” above to begin…" disabled></textarea>
+        <div class="composer-actions">
+          <button type="button" class="btn" id="email-btn" disabled>Preview email</button>
+          <button type="submit" class="btn primary" id="send-btn" disabled>Send</button>
+        </div>
+      </form>
+    </section>
+
+    <aside class="inspector card" aria-label="Harness inspector">
+      <div class="tabs" role="tablist">
+        <button role="tab" class="tab active" data-tab="state" aria-selected="true">SOP state</button>
+        <button role="tab" class="tab" data-tab="trace" aria-selected="false">Trace</button>
+      </div>
+      <div id="tab-state" class="tab-body">
+        <p class="muted">No conversation yet.</p>
+      </div>
+      <div id="tab-trace" class="tab-body hidden">
+        <p class="muted">Each turn's extraction, policy decision, and response source will appear here.</p>
+      </div>
+    </aside>
+  </main>
+
+  <dialog id="email-dialog" class="dialog">
+    <form method="dialog">
+      <header class="dialog-head">
+        <h2>Email summary preview</h2>
+        <button class="icon-btn" aria-label="Close">✕</button>
+      </header>
+      <dl class="email-meta">
+        <dt>To</dt><dd id="email-to"></dd>
+        <dt>Subject</dt><dd id="email-subject"></dd>
+      </dl>
+      <pre id="email-body" class="email-body"></pre>
+      <p class="muted small">Sending is simulated. Reply "yes" or "no" in the chat to choose.</p>
+    </form>
+  </dialog>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
