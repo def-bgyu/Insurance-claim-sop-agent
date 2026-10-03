@@ -23,13 +23,31 @@ _LAST4 = re.compile(
     r"(\b(?:ssn|social(?: security)?|national id|last (?:four|4)(?: digits)?)\b\D{0,25}?)\d{3}(\d)\b",
     re.IGNORECASE,
 )
+_FULL_SSN = re.compile(r"\b\d{3}[-\s.]?\d{2}[-\s.]?\d{4}\b")
+# A written-out date right after a DOB cue: "born 15 March 1985", "DOB is March 15, 1985".
+_MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?"
+_WORD_DATE = rf"(?:\d{{1,2}}(?:st|nd|rd|th)?\s+(?:of\s+)?{_MONTH}|{_MONTH}\s+\d{{1,2}}(?:st|nd|rd|th)?),?\s+(?:19|20)\d{{2}}"
+_DOB_WORD_DATE = re.compile(
+    rf"(\b(?:born|birth|dob|d\.o\.b|birthday)\b\D{{0,15}}?){_WORD_DATE}", re.IGNORECASE
+)
+# Identity values inside structured model output: "id_last4": "4472" or <dob>…</dob>.
+_STRUCTURED = re.compile(
+    r'("(?P<jkey>full_name|dob|phone|email|id_last4)"\s*:\s*")(?P<jval>[^"]*)(")'
+    r"|(<(?P<tkey>full_name|dob|phone|email|id_last4)>)(?P<tval>[^<]*)(</(?P=tkey)>)"
+)
+# Any date-shaped text, to find the caller's DOB written in another format.
+_ANY_DATE = re.compile(
+    rf"\b(?:(?:19|20)\d{{2}}-\d{{1,2}}-\d{{1,2}}|\d{{1,2}}/\d{{1,2}}/(?:19|20)\d{{2}}|{_WORD_DATE})\b",
+    re.IGNORECASE,
+)
 
 
 def mask_value(field: IdentityField, value: str) -> str:
     if field == IdentityField.ID_LAST4:
         return "***" + value[-1:]
     if field == IdentityField.DOB:
-        return value[:4] + "-**-**"
+        # Keep the year only for ISO dates; anything else ("15 March 1985") is fully hidden.
+        return value[:4] + "-**-**" if re.match(r"^\d{4}-", value) else "****-**-**"
     if field == IdentityField.PHONE:
         return "***-***-" + value[-4:]
     if field == IdentityField.EMAIL:
@@ -40,14 +58,44 @@ def mask_value(field: IdentityField, value: str) -> str:
     return "***"
 
 
-def mask_text(text: str) -> str:
+def _mask_structured(match: re.Match) -> str:
+    key = match.group("jkey") or match.group("tkey")
+    value = match.group("jval") if match.group("jkey") else match.group("tval")
+    masked = mask_value(IdentityField(key), value) if value else value
+    if match.group("jkey"):
+        return f"{match.group(1)}{masked}{match.group(4)}"
+    return f"{match.group(5)}{masked}{match.group(8)}"
 
+
+def mask_text(text: str) -> str:
+    """Pattern-based masking for free text (caller messages, raw model output)."""
+    text = _STRUCTURED.sub(_mask_structured, text)
+    text = _FULL_SSN.sub("***-**-****", text)
     text = _EMAIL.sub(r"\1***\2", text)
+    text = _DOB_WORD_DATE.sub(r"\1****-**-**", text)
     text = _ISO_DATE.sub(r"\1-**-**", text)
     text = _US_DATE.sub(r"**/**/\1", text)
     text = _PHONE.sub(r"***-***-\1", text)
     text = _LAST4.sub(r"\1***\2", text)
     return text
+
+
+def redact(text: str, known: dict[IdentityField, set[str]]) -> str:
+    """Mask by value: every identity value seen this turn is replaced wherever it
+    appears, in any format, then pattern masking catches the rest. Patterns alone
+    miss phrasings nobody anticipated; values don't."""
+    from backend.sop.normalize import normalize_dob  # local: avoids an import cycle
+
+    for field, values in known.items():
+        for value in sorted(values, key=len, reverse=True):
+            if len(value) >= 4:
+                text = re.sub(re.escape(value), mask_value(field, value), text, flags=re.IGNORECASE)
+    dobs = {normalize_dob(v) for v in known.get(IdentityField.DOB, set())} - {None}
+    if dobs:
+        text = _ANY_DATE.sub(
+            lambda m: "****-**-**" if normalize_dob(m.group(0)) in dobs else m.group(0), text
+        )
+    return mask_text(text)
 
 
 def public_snapshot(state: SessionState) -> dict:

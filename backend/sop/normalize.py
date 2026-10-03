@@ -22,18 +22,31 @@ def name_tokens(name: str) -> list[str]:
     return text.split()
 
 
+def _comparable_tokens(name: str) -> list[str]:
+    """Tokens in given-then-family order, without single-letter initials.
+
+    "CHEN, Margaret A." -> ['margaret', 'chen']: a comma means "Family, Given",
+    and initials are dropped so they never block a match.
+    """
+    if "," in name:
+        family, _, given = name.partition(",")
+        name = f"{given} {family}"
+    return [t for t in name_tokens(name) if len(t) > 1]
+
+
 def names_match(given: str, record_names: list[str]) -> bool:
     """Lenient on formatting, strict on identity. Nicknames do NOT match.
 
-    Accepts: case/punctuation/accent differences, a middle name or initial that is
-    not on file, given/family order swapped, and spacing differences ("Yawen Li").
+    Accepts, in any combination: case/punctuation/accent differences, a middle name
+    or initial that is not on file, given/family order swapped (with or without a
+    comma), and spacing differences ("Yawen Li").
     """
-    given_tokens = name_tokens(given)
+    given_tokens = _comparable_tokens(given)
     if len(given_tokens) < 2:
         return False  # a first name alone is not a full name
 
     for record_name in record_names:
-        record_tokens = name_tokens(record_name)
+        record_tokens = _comparable_tokens(record_name)
         if len(record_tokens) < 2:
             continue
         if "".join(given_tokens) == "".join(record_tokens):

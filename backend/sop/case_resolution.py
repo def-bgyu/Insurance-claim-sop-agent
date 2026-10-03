@@ -8,6 +8,40 @@ from backend.data import Claim
 from backend.sop.state import CaseHints
 
 
+# Everyday synonyms, applied only when the caller's word isn't itself a value in the
+# data and the synonym's target is. Unknown words are kept as-is (they simply won't
+# match), never guessed into another status or type.
+_STATUS_SYNONYMS = {
+    "rejected": "denied", "declined": "denied",
+    "pending": "open", "in progress": "open", "processing": "open", "under review": "open",
+    "paid": "closed", "settled": "closed", "completed": "closed",
+}
+_TYPE_SYNONYMS = {
+    "medical": "healthcare", "health": "healthcare", "doctor": "healthcare",
+    "hospital": "healthcare", "dentist": "dental", "car": "auto", "vehicle": "auto",
+}
+
+
+def _to_known(word: str | None, known: tuple[str, ...], synonyms: dict[str, str]) -> str | None:
+    if not word:
+        return word
+    word = word.strip().lower()
+    if word in known:
+        return word
+    if synonyms.get(word) in known:
+        return synonyms[word]
+    singular = word.removesuffix("s")
+    return singular if singular in known else word
+
+
+def match_status(word: str | None, statuses: tuple[str, ...]) -> str | None:
+    return _to_known(word, statuses, _STATUS_SYNONYMS)
+
+
+def match_case_type(word: str | None, case_types: tuple[str, ...]) -> str | None:
+    return _to_known(word, case_types, _TYPE_SYNONYMS)
+
+
 def has_hints(hints: CaseHints) -> bool:
     return any([hints.case_id, hints.case_type, hints.status, hints.month, hints.day, hints.year])
 

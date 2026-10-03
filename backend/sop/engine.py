@@ -39,7 +39,7 @@ from backend.sop.spec import (
 from backend.sop.state import CaseHints, DiscussedItem, SessionState, Turn
 from backend.sop.normalize import normalize_email
 from backend.sop.verification import normalize_identity_value, verify_identity
-from backend.trace import TraceWriter, mask_fields, mask_text, mask_value, public_snapshot
+from backend.trace import TraceWriter, mask_fields, mask_value, public_snapshot, redact
 
 _UPSET = {Emotion.FRUSTRATED, Emotion.ANGRY}
 
@@ -137,12 +137,17 @@ class SOPEngine:
             outcome = None
         else:
             topics = [t.topic for t in self.data.followup_topics()]
-            outcome = extract(self.provider, user_text, state.phase.value, last_agent, topics)
+            vocab = self.data.vocabulary
+            outcome = extract(self.provider, user_text, state.phase.value, last_agent, topics, vocab)
             ex = outcome.extraction
+            # Map the caller's words onto statuses/types that exist in the loaded data.
+            ex.case_status = case_resolution.match_status(ex.case_status, vocab.statuses)
+            ex.case_type = case_resolution.match_case_type(ex.case_type, vocab.case_types)
             self._remember(state, ex)
             plan = self._guards(state, ex) or self._phase_plan(state, ex, user_text)
             plan = self._stuck_check(state, ex, plan)
             plan.acknowledge_emotion = ex.emotion != Emotion.NEUTRAL
+            plan.require_apology = ex.emotion == Emotion.ANGRY
 
         # Hard invariant: claim facts can never reach the responder before verification.
         if plan.facts and not state.verified:
@@ -151,6 +156,7 @@ class SOPEngine:
         # The question this reply ends with is the one the next yes/no answers.
         state.pending_question = plan.pending_question
         self._apply_name_policy(state, plan)
+        plan.claim_id_pattern = self.data.vocabulary.claim_id_re
 
         response = respond(self.provider, state, plan)
         state.transcript.append(Turn(role="agent", text=response.text, phase=state.phase))
@@ -206,6 +212,13 @@ class SOPEngine:
             own |= {t.lower() for t in rep.split()}
             plan.address_as = " ".join(rep.split()[:-1]) or rep
             plan.representative = f"{rep} ({state.consent.relationship})"
+            # The policyholder may be talked about, but the caller is the representative,
+            # even if they now claim to be the policyholder (live test: "Actually I am
+            # Margaret" after consent was denied got "Thanks, Margaret").
+            plan.no_address_names = sorted(
+                {t.capitalize() for n in holder.all_names for t in n.split()}
+                - {t.capitalize() for t in rep.split()}
+            )
         plan.forbidden_names = sorted(t for t in mentioned if t.lower() not in own)
 
     # --- Cross-cutting guards ----------------------------------------------------------
@@ -221,8 +234,14 @@ class SOPEngine:
 
         answer = _answer(ex)
         offer_open = state.pending_question == Pending.OFFER_HUMAN
+
+        # While a human offer is open, a plain "no" declines the offer; only an explicit
+        # "that's all" / "bye" means the caller is done. (Live test: the model read
+        # "No." as done and the chat ended without the re-offer.)
+        if offer_open and ex.wants_to_end and not ex.done_phrase:
+            ex.wants_to_end = False
         new_question = bool(ex.intent and ex.intent not in (Intent.UNKNOWN, Intent.SPEAK_TO_HUMAN)) or bool(
-            ex.followup_topic
+            ex.followup_topics
         )
 
         wants_human = ex.wants_human or ex.intent == Intent.SPEAK_TO_HUMAN
@@ -237,7 +256,10 @@ class SOPEngine:
         if offer_open and declined and not new_question and not ex.wants_to_end:
             return self._human_declined(state, ex)
 
-        if ex.emotion in _UPSET or ex.refuses_to_share:
+        # Worry is not refusal: an anxious turn only counts as a refusal if the caller
+        # explicitly declined something (live test: privacy worry added a strike).
+        refused = ex.refuses_to_share and (ex.emotion != Emotion.ANXIOUS or ex.refusal_phrase)
+        if ex.emotion in _UPSET or refused:
             state.counters.frustration += 1
             if state.counters.frustration >= Limits.FRUSTRATION:
                 return self._escalate(state, "frustration_limit")
@@ -401,10 +423,18 @@ class SOPEngine:
         return ANYTHING_ELSE_QUESTION, Pending.ANYTHING_ELSE
 
     def _stuck_check(self, state: SessionState, ex: Extraction, plan: ResponsePlan) -> ResponsePlan:
-        """Safety net: if we're about to ask the exact same question a 3rd time in a row,
-        the conversation isn't progressing. Offer a human instead of looping."""
+        """Safety net: if we're about to ask the exact same question a 3rd time in a row
+        AND the caller keeps adding nothing new, the conversation isn't progressing.
+        Offer a human instead of looping.
+
+        "Nothing new" matters: every answer ends with "Is there anything else I can help
+        you with?", so three different follow-up questions must not look stuck (live
+        test: a third, different document question got a human offer)."""
         repeatable = plan.pending_question in (Pending.OFFER_HUMAN, Pending.OFFER_EMAIL)
-        if plan.closing_question and plan.closing_question == state.last_closing_question and not repeatable:
+        signals = {"emotion", "off_topic", "done_phrase", "refusal_phrase"}
+        progress = bool(ex.useful_fields() - signals)
+        same_question = plan.closing_question and plan.closing_question == state.last_closing_question
+        if same_question and not repeatable and not progress:
             state.repeat_count += 1
         else:
             state.repeat_count = 0
@@ -556,11 +586,22 @@ class SOPEngine:
                 f"Let them know you've noted they're calling about their "
                 f"{_describe_hints(state.hints)} and will look into it right after verification. "
             )
+        full_id_note = ""
+        if ex.full_id_given:
+            # The full number was discarded; it never counts toward verification.
+            full_id_note = (
+                "Tell them kindly that, for their security, they should never share a full "
+                "SSN or ID number; only the last four digits are needed. "
+            )
+            reasons.append("full SSN/ID given: discarded")
         unreadable_note = ""
         if unreadable:
+            # Plain wording: "could not be read" made the model talk about reading an ID
+            # card, though the caller only typed text.
             unreadable_note = (
-                f"Say the {_join_or(self._labels(unreadable))} they gave could not be read (for an ID, "
-                "only the last four digits are needed; for a date of birth, the full date). "
+                f"Say you couldn't use the {_join_or(self._labels(unreadable))} in the form it "
+                "was typed (for an ID, only the last four digits are needed; for a date of birth, "
+                "the full date), and that any of the other details works as well. "
             )
 
         missing = self._missing(state)
@@ -576,9 +617,9 @@ class SOPEngine:
                 return ResponsePlan(
                     action="verification_mismatch",
                     directive=(
-                        f"{tone}Say you weren't able to verify their identity with the details so far, "
-                        "and that one more detail would help. Do NOT say which detail did not match. "
-                        f"{explain_why}"
+                        f"{tone}{full_id_note}Say you weren't able to verify their identity with the "
+                        "details so far, and that one more detail would help. Do NOT say which detail "
+                        f"did not match. {explain_why}"
                     ),
                     fallback_text="I wasn't able to verify your identity with the details provided so far.",
                     closing_question=f"To continue, could you also share your {_join_or(self._labels(missing))}?",
@@ -600,15 +641,20 @@ class SOPEngine:
 
         if ex.refuses_to_share:
             reasons.append("caller refused a field; offering alternatives")
+        if ex.emotion == Emotion.ANGRY:
+            opener_text = "I'm sorry for the trouble. "
+        else:
+            opener_text = "I understand. " if tone else "Thank you. "
         return ResponsePlan(
             action="ask_identity",
             directive=(
-                f"{tone}{explain_why}{noted}{unreadable_note}"
+                f"{tone}{full_id_note}{explain_why}{noted}{unreadable_note}"
                 "Briefly say you need a few more details to verify their identity. If they refused "
                 "one detail, reassure them that any of the others works instead."
             ),
             fallback_text=(
-                f"{'I understand. ' if tone else 'Thank you. '}"
+                f"{opener_text}"
+                f"{'For your security, please never share a full SSN; only the last four digits are needed. ' if full_id_note else ''}"
                 f"{'Claim details are protected, so I need to verify your identity first.' if explain_why else 'I just need a bit more to verify your identity.'}"
             ),
             closing_question=self._identity_question(state),
@@ -713,6 +759,7 @@ class SOPEngine:
 
         state.pending_question = plan.pending_question
         self._apply_name_policy(state, plan)
+        plan.claim_id_pattern = self.data.vocabulary.claim_id_re
         response = respond(self.provider, state, plan)
         state.transcript.append(Turn(role="agent", text=response.text, phase=state.phase))
 
@@ -943,7 +990,7 @@ class SOPEngine:
         self, state: SessionState, ex: Extraction, user_text: str, just_selected: bool = False
     ) -> ResponsePlan:
         claim = self.data.get_claim(state.verified_party_id, state.selected_case_id)
-        new_question = bool(ex.intent and ex.intent != Intent.UNKNOWN) or bool(ex.followup_topic)
+        new_question = bool(ex.intent and ex.intent != Intent.UNKNOWN) or bool(ex.followup_topics)
 
         if not just_selected:
             done = ex.wants_to_end or (
@@ -967,7 +1014,7 @@ class SOPEngine:
         intent = intent or Intent.STATUS_INQUIRY
         question = "" if just_selected else user_text
         answer = grounding.build_answer(
-            self.data, claim, intent, question, ex.followup_topic, self.today()
+            self.data, claim, intent, question, ex.followup_topics, self.today()
         )
         state.discussed.append(
             DiscussedItem(case_id=claim.case_id, intent=intent, facts=answer.facts, next_steps=answer.next_steps)
@@ -1084,19 +1131,37 @@ class SOPEngine:
 
     # --- Trace -------------------------------------------------------------------------
 
+    def _known_identity(self, state: SessionState, outcome) -> dict[IdentityField, set[str]]:
+        """Every identity value seen this turn, raw and normalized, for masking by value."""
+        known: dict[IdentityField, set[str]] = {f: set() for f in IdentityField}
+        for field, value in state.identity.items():
+            known[field].add(value)
+        if outcome is not None:
+            for field in IdentityField:
+                if raw := getattr(outcome.extraction, field.value):
+                    known[field].add(raw)
+                if raw := outcome.regex_fields.get(field.value):
+                    known[field].add(raw)
+        return {f: v for f, v in known.items() if v}
+
     def _trace(self, state, phase_before, pending_before, user_text, outcome, plan, response) -> dict:
+        known = self._known_identity(state, outcome)
+
+        def scrub(text: str) -> str:
+            return redact(text, known)
+
         record = {
             "turn": sum(1 for t in state.transcript if t.role == "user"),
             "phase_before": phase_before.value,
             "phase_after": state.phase.value,
             "pending_question_before": pending_before,
-            "user_text": mask_text(user_text),
+            "user_text": scrub(user_text),
             "plan": {
                 "action": plan.action,
                 "reasons": plan.reasons,
-                "directive": mask_text(plan.directive),
+                "directive": scrub(plan.directive),
                 "facts": plan.facts,
-                "closing_question": mask_text(plan.closing_question or ""),
+                "closing_question": scrub(plan.closing_question or ""),
                 "pending_question": plan.pending_question,
             },
             "response": {
@@ -1106,7 +1171,7 @@ class SOPEngine:
                 "llm_latency_ms": response.llm.latency_ms if response.llm else None,
                 "llm_error": response.llm.error if response.llm else None,
             },
-            "reply": mask_text(response.text),
+            "reply": scrub(response.text),
             "state": public_snapshot(state),
         }
         if outcome is not None:
@@ -1116,6 +1181,6 @@ class SOPEngine:
                 "fields": mask_fields(outcome.extraction.model_dump(exclude_defaults=True, mode="json")),
                 "llm_latency_ms": outcome.llm.latency_ms if outcome.llm else None,
                 "llm_error": outcome.llm.error if outcome.llm else None,
-                "raw_output": mask_text(outcome.llm.text[:2000]) if outcome.llm else None,
+                "raw_output": scrub(outcome.llm.text[:2000]) if outcome.llm else None,
             }
         return record

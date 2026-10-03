@@ -15,6 +15,7 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError, field_validator
 
+from backend.data import Vocabulary
 from backend.llm import prompts
 from backend.llm.parsing import parse_json_object
 from backend.llm.provider import LLMProvider, LLMResult, Message
@@ -42,13 +43,6 @@ _MONTHS = {
         start=1,
     )
 }
-_STATUS_SYNONYMS = {
-    "denied": "denied", "rejected": "denied", "declined": "denied",
-    "open": "open", "pending": "open", "in progress": "open", "processing": "open",
-    "closed": "closed", "paid": "closed", "settled": "closed", "completed": "closed",
-}
-
-
 class Extraction(BaseModel):
     """Flat on purpose: small models handle flat schemas far better than nested ones."""
 
@@ -72,7 +66,7 @@ class Extraction(BaseModel):
 
     # Conversation signals.
     intent: Intent | None = None
-    followup_topic: str | None = None
+    followup_topics: list[str] = []  # a message can ask several things at once
     confirms_case: YesNo | None = None
     email_consent: YesNo | None = None
     emotion: Emotion = Emotion.NEUTRAL
@@ -81,6 +75,11 @@ class Extraction(BaseModel):
     off_topic: bool = False
     wants_human: bool = False
     wants_to_end: bool = False
+
+    # Set only by code (never by the model), from the caller's exact words.
+    full_id_given: bool = False  # a full SSN/ID was typed: its last four are discarded
+    done_phrase: bool = False  # an explicit "that's all" / "bye", not just "no"
+    refusal_phrase: bool = False  # an explicit refusal ("I won't give you that")
 
     @field_validator("case_month", mode="before")
     @classmethod
@@ -114,12 +113,18 @@ class Extraction(BaseModel):
     def _day_range(cls, v: int | None):
         return v if v is None or 1 <= v <= 31 else None
 
-    @field_validator("case_status", mode="before")
+    @field_validator("followup_topics", mode="before")
     @classmethod
-    def _status(cls, v: Any):
-        return _STATUS_SYNONYMS.get(str(v).strip().lower()) if v else None
+    def _topics(cls, v: Any):
+        if not v:
+            return []
+        values = v if isinstance(v, list) else [v]
+        return [str(t).strip() for t in values if str(t).strip().lower() not in {"", "null", "none"}]
 
-    @field_validator("case_type", "caller_role", mode="before")
+    # The caller's own words are kept (lowercased). The engine maps them onto the
+    # statuses and types that actually exist in the data; unknown words are never
+    # guessed into a different status.
+    @field_validator("case_status", "case_type", "caller_role", mode="before")
     @classmethod
     def _lower(cls, v: Any):
         return str(v).strip().lower() or None if v else None
@@ -131,7 +136,7 @@ class Extraction(BaseModel):
 
     @field_validator(
         "full_name", "dob", "phone", "email", "id_last4", "representative_name",
-        "followup_topic", "unsupported_request", mode="before",
+        "unsupported_request", mode="before",
     )
     @classmethod
     def _blank_to_none(cls, v: Any):
@@ -150,6 +155,8 @@ FIELD_NAMES = list(Extraction.model_fields)
 
 def coerce_extraction(data: dict) -> Extraction:
     """Validate leniently: a bad value drops that one field, not the whole extraction."""
+    if "followup_topic" in data and "followup_topics" not in data:  # singular from older prompts
+        data["followup_topics"] = data.pop("followup_topic")
     data = {k: v for k, v in data.items() if k in Extraction.model_fields}
     for _ in range(len(FIELD_NAMES)):
         try:
@@ -171,11 +178,21 @@ _LAST4_CONTEXT = re.compile(
     re.IGNORECASE,
 )
 _DOB_CONTEXT = re.compile(r"\b(?:dob|d\.o\.b|birth|born|birthday)\b", re.IGNORECASE)
-_POLICY = re.compile(r"\bPOL-?\d+\b", re.IGNORECASE)
+# A full SSN (123-45-6789, 123 45 6789, 123456789). Phones (3-3-4) don't match.
+FULL_SSN = re.compile(r"\b\d{3}[-\s.]?\d{2}[-\s.]?\d{4}\b")
+_REFUSAL = re.compile(
+    r"\b(?:won'?t|will not|not (?:going to|gonna)|rather not|don'?t want to|do not want to|"
+    r"not comfortable)\b[^.?!]{0,30}?\b(?:give|share|provide|tell|giving|sharing|providing)\b"
+    r"|\bi refuse\b|\bnone of your business\b",
+    re.IGNORECASE,
+)
+_POLICY = re.compile(r"\bPOL-?\d+\b", re.IGNORECASE)  # used when no data vocabulary is given
 _CASE = re.compile(r"\bCL-?\d+\b", re.IGNORECASE)
 
 
-def regex_prepass(text: str) -> dict[str, str]:
+def regex_prepass(text: str, vocab: Vocabulary | None = None) -> dict[str, str]:
+    """Strictly formatted values. Claim and policy IDs use the formats found in the
+    loaded data (e.g. CASE-A7X9 as well as CL-2048) when a vocabulary is given."""
     found: dict[str, str] = {}
     if m := _EMAIL.search(text):
         found["email"] = m.group(0)
@@ -191,18 +208,31 @@ def regex_prepass(text: str) -> dict[str, str]:
         found["phone"] = m.group(0)
     if m := _LAST4_CONTEXT.search(text):
         found["id_last4"] = m.group(1)
-    if m := _POLICY.search(text):
-        found["policy_number"] = m.group(0).upper().replace("POL", "POL-").replace("--", "-")
-    if m := _CASE.search(text):
-        found["case_id"] = m.group(0).upper().replace("CL", "CL-").replace("--", "-")
+    policy_re = vocab.policy_re if vocab else _POLICY
+    if m := policy_re.search(text):
+        raw = m.group(0)
+        found["policy_number"] = (
+            vocab.canonical_policy(raw) if vocab
+            else raw.upper().replace("POL", "POL-").replace("--", "-")
+        )
+    case_re = vocab.claim_id_re if vocab else _CASE
+    if m := case_re.search(text):
+        raw = m.group(0)
+        found["case_id"] = (
+            vocab.canonical_claim_id(raw) if vocab
+            else raw.upper().replace("CL", "CL-").replace("--", "-")
+        )
     return found
 
 
+# Everyday words for common claim types. Types from the data are always recognized by
+# their own name; these only add synonyms for types that exist.
 _CASE_TYPE_WORDS = {
     "healthcare": r"health ?care|medical|doctor|hospital",
     "dental": r"dental|dentist",
     "auto": r"auto|car|vehicle",
 }
+_DEFAULT_TYPES = ("auto", "dental", "healthcare")
 _DENIED_WORDS = re.compile(r"\b(?:denied|rejected|declined)\b", re.IGNORECASE)
 _CLAIM_MONTH = re.compile(
     r"\b(?:from|in|since|back in)\s+(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?"
@@ -216,14 +246,29 @@ _DONE = re.compile(
 )
 
 
-def keyword_hints(text: str) -> dict[str, str]:
+def keyword_hints(text: str, vocab: Vocabulary | None = None) -> dict[str, str]:
     """Backup case hints from plain keywords. Used only where the LLM gave nothing,
     because the LLM understands negation ("not my dental claim") and keywords don't."""
     found: dict[str, str] = {}
-    types = [t for t, words in _CASE_TYPE_WORDS.items() if re.search(rf"\b(?:{words})\b", text, re.I)]
+    known_types = vocab.case_types if vocab else _DEFAULT_TYPES
+    types = []
+    for case_type in known_types:
+        words = re.escape(case_type)
+        if synonyms := _CASE_TYPE_WORDS.get(case_type):
+            words = f"{words}|{synonyms}"
+        if re.search(rf"\b(?:{words})\b", text, re.I):
+            types.append(case_type)
     if len(types) == 1:
         found["case_type"] = types[0]
-    if _DENIED_WORDS.search(text):
+    # A status word counts only when it describes a claim ("my approved claim", "the claim
+    # that was approved"), since words like "open" are also everyday verbs.
+    statuses = [
+        s for s in (vocab.statuses if vocab else ())
+        if re.search(rf"\b{re.escape(s)}\b[^.?!]{{0,25}}\bclaim|\bclaim\b[^.?!]{{0,25}}\b{re.escape(s)}\b", text, re.I)
+    ]
+    if len(statuses) == 1:
+        found["case_status"] = statuses[0]
+    elif _DENIED_WORDS.search(text):
         found["case_status"] = "denied"
     if m := _CLAIM_MONTH.search(text):
         found["case_month"] = m.group(1)
@@ -254,10 +299,15 @@ def extract(
     phase: str,
     last_agent_message: str | None,
     followup_topics: list[str],
+    vocab: Vocabulary | None = None,
 ) -> ExtractionOutcome:
-    regex_fields = regex_prepass(user_text)
+    regex_fields = regex_prepass(user_text, vocab)
 
-    system = prompts.extractor_system(phase, last_agent_message, followup_topics)
+    system = prompts.extractor_system(
+        phase, last_agent_message, followup_topics,
+        statuses=list(vocab.statuses) if vocab else None,
+        case_types=list(vocab.case_types) if vocab else None,
+    )
     result = provider.complete(system, [Message("user", user_text)], max_tokens=600)
 
     if result.error:
@@ -269,5 +319,13 @@ def extract(
     # Priority: keyword hints < LLM < regex. Regex values are literal matches of
     # strictly formatted fields, so they win; keywords only fill gaps.
     llm_values = {k: v for k, v in parsed_data.items() if v not in (None, "", [])}
-    merged = {**keyword_hints(user_text), **llm_values, **regex_fields}
+    merged = {**keyword_hints(user_text, vocab), **llm_values, **regex_fields}
+
+    # Code-only signals, which override anything the model returned. A full SSN must
+    # never count: the model may still "helpfully" pull the last four out of it.
+    merged["full_id_given"] = bool(FULL_SSN.search(user_text))
+    merged["done_phrase"] = bool(_DONE.search(user_text))
+    merged["refusal_phrase"] = bool(_REFUSAL.search(user_text))
+    if merged["full_id_given"]:
+        merged.pop("id_last4", None)
     return ExtractionOutcome(coerce_extraction(merged), layer, regex_fields, result)

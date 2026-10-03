@@ -56,7 +56,11 @@ def _date_values(text: str) -> set[str]:
 _ACTION_CLAIM = re.compile(
     r"\b(?:transferr?ing you|connecting you|"
     r"(?:i'm|i am|i'll|i will|let me)\s+(?:now\s+|go ahead and\s+)?(?:transfer|connect|put you through)|"
-    r"(?:i've|i have)\s+(?:sent|emailed)|sending (?:you )?(?:the|an|your) (?:email|summary))",
+    r"(?:i've|i have)\s+(?:sent|emailed)|sending (?:you )?(?:the|an|your) (?:email|summary)|"
+    # Promises to send, not only past-tense claims (live test: "I'll go ahead and send
+    # the summary…" before the caller had agreed).
+    r"(?:i'll|i will|i'm going to|let me|i can go ahead and)\s+(?:now\s+|go ahead and\s+)?"
+    r"(?:send|email|forward)\b|(?:will|is going to) be (?:sent|emailed)|on its way)",
     re.IGNORECASE,
 )
 
@@ -68,15 +72,22 @@ def action_violations(reply: str, plan: ResponsePlan) -> list[str]:
     return []
 
 
+def _compact_id(value: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", value.upper())
+
+
 def grounding_violations(reply: str, plan: ResponsePlan) -> list[str]:
+    # Claim IDs are recognized in whatever format the loaded data uses (CL-2048,
+    # CASE-A7X9…), so an invented ID in a non-CL format is caught too.
+    id_re = plan.claim_id_pattern or _CLAIM_ID
     allowed = " ".join([*plan.facts, plan.fallback_text, plan.closing_question or ""])
-    allowed_ids = {c.upper() for c in _CLAIM_ID.findall(allowed)}
+    allowed_ids = {_compact_id(c) for c in id_re.findall(allowed)}
     allowed_money = _money_values(allowed)
     allowed_dates = _date_values(allowed)
 
     violations = []
-    for claim_id in _CLAIM_ID.findall(reply):
-        if claim_id.upper() not in allowed_ids:
+    for claim_id in id_re.findall(reply):
+        if _compact_id(claim_id) not in allowed_ids:
             violations.append(f"ungrounded claim id {claim_id}")
     for amount in _money_values(reply) - allowed_money:
         violations.append(f"ungrounded amount {amount:.2f}")
@@ -139,31 +150,59 @@ _EMOTION_TALK = re.compile(
 
 
 def emotion_violations(reply: str, plan: ResponsePlan) -> list[str]:
+    violations = []
     if not plan.acknowledge_emotion and _EMOTION_TALK.search(reply):
-        return ["unprompted emotion talk"]
-    return []
+        violations.append("unprompted emotion talk")
+    if plan.require_apology and not re.search(r"\b(?:sorry|apologi[sz]e|apologies)\b", reply, re.I):
+        violations.append("missing apology")
+    return violations
+
+
+def address_violations(reply: str, plan: ResponsePlan) -> list[str]:
+    """Using a name to address the caller: "Thanks, Margaret." / "Margaret, I…"."""
+    violations = []
+    for name in plan.no_address_names:
+        n = re.escape(name)
+        vocative = (
+            rf",\s*{n}\s*[,.!?]|(?:^|[.!?]\s+){n},|"
+            rf"\b(?:hi|hello|thanks|thank you|dear|okay|sure|sorry)\b,?\s+{n}\b"
+        )
+        if re.search(vocative, reply, re.IGNORECASE):
+            violations.append(f"addresses caller as {name}")
+    return violations
 
 
 # Mistakes worth one regeneration: the rest of the reply is usually fine, and the
 # fallback would lose the natural tone. Everything else goes straight to the fallback.
 def _retry_note(violations: list[str], plan: ResponsePlan) -> str | None:
     notes = []
+    fix = (
+        f"address the caller as {plan.address_as} or without a name"
+        if plan.address_as else "do not address the caller by any name"
+    )
     names = [v.removeprefix("wrong name ") for v in violations if v.startswith("wrong name")]
     if names:
-        fix = (
-            f"address the caller as {plan.address_as} or without a name"
-            if plan.address_as else "do not address the caller by any name"
-        )
         notes.append(
             f"Your previous draft used a name that is not the verified customer's "
             f"({', '.join(names)}); {fix}."
+        )
+    addressed = [v.removeprefix("addresses caller as ") for v in violations if v.startswith("addresses caller as ")]
+    if addressed:
+        notes.append(
+            f"Your previous draft addressed the caller as {', '.join(addressed)}, which is not "
+            f"who is calling; {fix}."
         )
     if "unprompted emotion talk" in violations:
         notes.append(
             "Your previous draft commented on the caller's feelings; the caller has not "
             "expressed any, so do not mention feelings or frustration."
         )
-    retryable = len(names) + ("unprompted emotion talk" in violations)
+    if "missing apology" in violations:
+        notes.append("Begin with a brief, sincere apology for their experience.")
+    retryable = (
+        len(names) + len(addressed)
+        + ("unprompted emotion talk" in violations) + ("missing apology" in violations)
+    )
     if not notes or retryable != len(violations):
         return None
     return "IMPORTANT: " + " ".join(notes) + " Write the reply again."
@@ -186,7 +225,8 @@ def _generate(
         return "", result, ["empty"]
     violations = (
         grounding_violations(body, plan) + action_violations(body, plan)
-        + name_violations(body, plan) + emotion_violations(body, plan)
+        + name_violations(body, plan) + address_violations(body, plan)
+        + emotion_violations(body, plan)
     )
     return body, result, violations
 

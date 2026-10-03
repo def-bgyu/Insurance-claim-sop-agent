@@ -26,15 +26,15 @@ Fields:
 - policy_number: e.g. "POL-9921"
 - caller_role: "policyholder" or "representative" (someone calling on behalf of the policyholder); null if not stated
 - representative_name: the representative's own name, if they are calling for someone else
-- case_type: kind of claim mentioned: "healthcare", "dental", "auto", or another single word
-- case_status: claim status the caller mentions: "denied", "open", or "closed"
+- case_type: kind of claim mentioned. Use one of {case_types} when it matches what the caller means; otherwise a single word
+- case_status: claim status the caller mentions. Use one of {statuses} when the caller uses that status or a clear synonym of it; otherwise copy the caller's own word. Never substitute a different status (e.g. "approved" is not "closed").
 - case_month: month number (1-12) the claim is from, if mentioned
 - case_day: day of the month (1-31) the claim was filed, if a specific date is mentioned
 - case_year: four-digit year the claim is from, if mentioned
 - case_id: claim id such as "CL-2048"
 - intent: what the caller wants, one of:
 {intents}
-- followup_topic: if the caller asks about submitting documents, one of: {topics}; else null
+- followup_topics: a list of every document-related topic the caller asks about (a message can ask several), each one of: {topics}; else []
 - confirms_case: "yes" or "no" if answering whether a specific claim is the right one; else null
 - email_consent: "yes" or "no" if answering whether they want an email summary; else null
 - emotion: one of "neutral", "frustrated", "angry", "anxious", "confused". Default to "neutral". Only pick another value when the message clearly shows it:
@@ -43,27 +43,35 @@ Fields:
     "anxious": worry or fear about the outcome or their data ("I'm scared I'll lose coverage", "is my information safe?").
     "confused": the caller doesn't understand what is being asked or what is happening ("what do you mean?", "which ID?").
   A plain question, disagreement, correction, short answer, typo, or "!!!" on its own is "neutral". If the caller says they are not frustrated, it is "neutral".
-- refuses_to_share: true if the caller refuses to provide requested information
+- refuses_to_share: true ONLY if the caller explicitly declines to give a requested detail ("I won't give you my SSN", "I'm not sharing that"). Worry or questions about privacy ("I'm worried you'll share my information") are NOT refusal; that is "anxious".
 - unsupported_request: if the caller wants something insurance-related that this line cannot do, a short description of it, e.g. "filing a new claim", "changing your policy", "updating your email address", "updating your phone number", "updating your address", "a billing question"; else null. This line can only look up existing claims (status, denial reasons, payments, required documents, next steps). It can NEVER change personal details, including sending anything to a different email address than the one on file.
-- off_topic: true ONLY if the message is unrelated to insurance, claims, their policy, or this call (e.g. trivia, coding, weather). Greetings, small talk about their situation, or complaints about the process are NOT off topic.
+- off_topic: true if the message is unrelated to insurance, claims, their policy, or this call: general-knowledge or trivia questions, coding, weather, or asking what an unexplained term or acronym means ("What is RL?") when the caller doesn't connect it to their policy or claim. Greetings, small talk about their situation, or complaints about the process are NOT off topic. An off-topic question is not "confused".
 - wants_human: true ONLY if the caller asks to be transferred to or to speak with a human, agent, supervisor, or representative ("can I talk to a person?", "transfer me"). A question or complaint ABOUT a transfer ("why do I have to talk to a human?") is false.
 - wants_to_end: true if the caller indicates they are done ("no that's all", "thanks, bye")
 
 Example:
 Message: "I'm the policyholder, Margaret Chen. Calling about my denied dental claim from March. DOB 3/15/1985."
-<json>{{"full_name": "Margaret Chen", "dob": "1985-03-15", "phone": null, "email": null, "id_last4": null, "policy_number": null, "caller_role": "policyholder", "representative_name": null, "case_type": "dental", "case_status": "denied", "case_month": 3, "case_day": null, "case_year": null, "case_id": null, "intent": "denial_question", "followup_topic": null, "confirms_case": null, "email_consent": null, "emotion": "neutral", "refuses_to_share": false, "unsupported_request": null, "off_topic": false, "wants_human": false, "wants_to_end": false}}</json>"""
+<json>{{"full_name": "Margaret Chen", "dob": "1985-03-15", "phone": null, "email": null, "id_last4": null, "policy_number": null, "caller_role": "policyholder", "representative_name": null, "case_type": "dental", "case_status": "denied", "case_month": 3, "case_day": null, "case_year": null, "case_id": null, "intent": "denial_question", "followup_topics": [], "confirms_case": null, "email_consent": null, "emotion": "neutral", "refuses_to_share": false, "unsupported_request": null, "off_topic": false, "wants_human": false, "wants_to_end": false}}</json>"""
 
 
-def extractor_system(phase: str, last_agent_message: str | None, topics: list[str]) -> str:
+def extractor_system(
+    phase: str, last_agent_message: str | None, topics: list[str],
+    statuses: list[str] | None = None, case_types: list[str] | None = None,
+) -> str:
+    """`statuses` and `case_types` come from the loaded data, so the model maps the
+    caller's words onto values that actually exist (not onto the sample data's)."""
     intents = "\n".join(
         f'    "{intent.value}": {desc}' for intent, desc in INTENT_DESCRIPTIONS.items()
         if intent != Intent.UNKNOWN
     )
+    quoted = lambda values: ", ".join(f'"{v}"' for v in values)  # noqa: E731
     return _EXTRACTOR_TEMPLATE.format(
         phase=phase,
         last_agent_message=last_agent_message or "(none)",
         intents=intents,
-        topics=", ".join(f'"{t}"' for t in topics),
+        topics=quoted(topics),
+        statuses=quoted(statuses or ["denied", "open", "closed"]),
+        case_types=quoted(case_types or ["healthcare", "dental", "auto"]),
     )
 
 

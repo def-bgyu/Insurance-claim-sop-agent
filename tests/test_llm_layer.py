@@ -39,8 +39,17 @@ def test_bad_fields_are_dropped_not_fatal():
     assert ex.full_name == "Ava Lopez" and ex.intent is None and ex.case_month == 1
 
 
-def test_status_synonyms():
-    assert coerce_extraction({"case_status": "Rejected"}).case_status == "denied"
+def test_status_words_are_kept_then_mapped_to_statuses_in_the_data():
+    from backend.sop.case_resolution import match_status
+
+    # The extractor keeps the caller's word; the engine maps it onto real statuses.
+    assert coerce_extraction({"case_status": "Rejected"}).case_status == "rejected"
+    assert match_status("rejected", ("closed", "denied", "open")) == "denied"
+    # A status that exists in the data is never turned into another one.
+    assert match_status("approved", ("approved", "closed", "open")) == "approved"
+    assert match_status("pending", ("pending", "open")) == "pending"
+    # An unknown word stays as-is (it won't match), rather than being guessed.
+    assert match_status("approved", ("closed", "denied", "open")) == "approved"
 
 
 # --- Sanitizing ---------------------------------------------------------------------

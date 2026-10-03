@@ -40,16 +40,32 @@ def deadline_passed(claim: Claim, today: date) -> bool:
     return claim.appeal_deadline is not None and claim.appeal_deadline < today
 
 
+# Phrases for topics the guideline file gives no trigger phrases for. "What if I can't
+# get the documents?" must reach the alternatives guidance (live test: a two-part
+# question lost this half).
+_EXTRA_PHRASES = {
+    "missing_required_material_alternatives": (
+        "can't get", "cannot get", "can not get", "can't obtain", "cannot obtain",
+        "unable to get", "unable to obtain", "don't have the", "don't have them",
+        "don't have it", "do not have the", "what if i can't", "what if i cannot",
+        "alternative", "lost the", "no longer have",
+    ),
+}
+
+
 def match_followup_topics(
-    data: InsuranceData, claim: Claim, user_text: str, llm_topic: str | None
+    data: InsuranceData, claim: Claim, user_text: str, llm_topics: list[str] | None
 ) -> list[FollowupTopic]:
-    """Deterministic phrase match first; the LLM's topic choice only as a fallback."""
+    """Every topic the caller asked about: phrases from the guideline file, extra
+    phrases for topics it has none for, and the LLM's choices. A message can ask
+    several things ("where do I send them, and what if I can't get them?")."""
     topics = [t for t in data.followup_topics() if claim.documents_needed or not t.requires_documents]
     text = user_text.lower()
-    matched = [t for t in topics if any(p in text for p in t.match_any)]
-    if not matched and llm_topic:
-        matched = [t for t in topics if t.topic == llm_topic]
-    return matched
+    chosen = set(llm_topics or [])
+    return [
+        t for t in topics
+        if any(p in text for p in (*t.match_any, *_EXTRA_PHRASES.get(t.topic, ()))) or t.topic in chosen
+    ]
 
 
 def _fill(template: str, claim: Claim, data: InsuranceData) -> str:
@@ -113,7 +129,7 @@ def build_answer(
     claim: Claim,
     intent: Intent,
     user_text: str,
-    llm_topic: str | None,
+    llm_topics: list[str] | None,
     today: date,
 ) -> GroundedAnswer:
     facts = _base_facts(claim)
@@ -142,7 +158,7 @@ def build_answer(
         facts += denial
         next_steps += denial_steps
         if not needs_human:
-            topics = match_followup_topics(data, claim, user_text, llm_topic)
+            topics = match_followup_topics(data, claim, user_text, llm_topics)
             for topic in topics:
                 facts.append(_fill(topic.template, claim, data))
                 topics_used.append(topic.topic)

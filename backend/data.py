@@ -1,8 +1,10 @@
 #reads data from fixture and works as a data endpoint.
 
 import json
+import re
+from dataclasses import dataclass
 from datetime import date
-from functools import lru_cache
+from functools import cached_property, lru_cache
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -70,6 +72,44 @@ class FollowupTopic(BaseModel):
     template: str = Field(alias="en")
 
 
+# --- Vocabulary learned from the data ---------------------------------------------------
+
+
+def _id_pattern(ids: list[str], default_prefixes: tuple[str, ...]) -> re.Pattern:
+    """A regex for IDs shaped like the ones in the data: "CL-2048" and "CASE-A7X9" give
+    prefixes CL and CASE, so a made-up "CASE-Z9Q8" is still recognized as a claim ID."""
+    prefixes = set(default_prefixes)
+    for value in ids:
+        if m := re.match(r"([A-Za-z]+)[-_]", value):
+            prefixes.add(m.group(1).upper())
+    alternatives = "|".join(sorted(map(re.escape, prefixes), key=len, reverse=True))
+    return re.compile(rf"\b(?:{alternatives})[-_]?[A-Z0-9]*\d[A-Z0-9]*\b", re.IGNORECASE)
+
+
+def _compact(value: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", value.upper())
+
+
+@dataclass(frozen=True)
+class Vocabulary:
+    """Values the conversation layer must recognize, taken from the loaded fixtures
+    rather than hard-coded to the sample data (statuses, claim types, ID formats)."""
+
+    statuses: tuple[str, ...]
+    case_types: tuple[str, ...]
+    claim_ids: tuple[str, ...]
+    policy_numbers: tuple[str, ...]
+    claim_id_re: re.Pattern
+    policy_re: re.Pattern
+
+    def canonical_claim_id(self, raw: str) -> str:
+        """'cl2048' or 'CL 2048' -> 'CL-2048' when that claim exists; else uppercased raw."""
+        return next((c for c in self.claim_ids if _compact(c) == _compact(raw)), raw.upper())
+
+    def canonical_policy(self, raw: str) -> str:
+        return next((p for p in self.policy_numbers if _compact(p) == _compact(raw)), raw.upper())
+
+
 # --- Loading --------------------------------------------------------------------------
 
 
@@ -95,6 +135,19 @@ class InsuranceData:
         self._followup_topics = [
             FollowupTopic(**t) for t in self._guidance["claim_followup_guidance"]
         ]
+
+    @cached_property
+    def vocabulary(self) -> Vocabulary:
+        claim_ids = [c.case_id for c in self._claims]
+        policies = [p.policy_number for p in self._policyholders]
+        return Vocabulary(
+            statuses=tuple(sorted({c.status.lower() for c in self._claims})),
+            case_types=tuple(sorted({c.case_type.lower() for c in self._claims})),
+            claim_ids=tuple(claim_ids),
+            policy_numbers=tuple(policies),
+            claim_id_re=_id_pattern(claim_ids, ("CL",)),
+            policy_re=_id_pattern(policies, ("POL",)),
+        )
 
     # --- Identity (used only by sop/verification.py) ----------------------------------
 

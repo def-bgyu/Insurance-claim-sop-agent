@@ -9,6 +9,7 @@ question the caller must answer is therefore always the one the state expects,
 and `pending_question` tells the next turn how to read a "yes" or "no".
 """
 
+import re
 from dataclasses import dataclass, field
 
 
@@ -44,3 +45,10 @@ class ResponsePlan:
     # may not comment on the caller's feelings (set by the engine on every turn).
     acknowledge_emotion: bool = False
     forbidden_names: list[str] = field(default_factory=list)  # names the reply must not use
+    # Names that may be mentioned but never used to address the caller (e.g. the
+    # policyholder, while their representative is the one calling).
+    no_address_names: list[str] = field(default_factory=list)
+    require_apology: bool = False  # the caller is angry: the reply must apologize
+    # Claim-ID format from the loaded data (e.g. CL-2048, CASE-A7X9), so the grounding
+    # guard recognizes an invented ID in whatever format the data uses.
+    claim_id_pattern: re.Pattern | None = None
