@@ -78,7 +78,7 @@ INTENT_DESCRIPTIONS: dict[Intent, str] = {
     Intent.DOCUMENT_SUBMISSION: "Which documents are needed, how/where/when to send them, format.",
     Intent.NEXT_STEPS: "What should I do now / how do I fix this / appeal.",
     Intent.GENERAL_CLAIM_QUESTION: "Any other question about a specific claim.",
-    Intent.SPEAK_TO_HUMAN: "Caller explicitly asks for a human representative.",
+    Intent.SPEAK_TO_HUMAN: "Caller explicitly asks to be transferred to a human (not a question about why).",
     Intent.UNKNOWN: "Not enough information to tell what the caller wants.",
 }
 

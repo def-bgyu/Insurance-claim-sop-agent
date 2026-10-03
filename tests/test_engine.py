@@ -56,7 +56,8 @@ def test_margaret_full_workflow():
     assert confirm.trace["phase_after"] == "PROCESS_CASE"
     assert "pathology report" in confirm.reply
     assert "already passed" in confirm.reply
-    assert state.human_offered
+    assert confirm.reply.endswith("human claims representative to review your options?")
+    assert confirm.trace["plan"]["pending_question"] == "offer_human"
 
     assert wrap.trace["phase_after"] == "POST_PROCESS"
     assert "Preview email" in wrap.reply
@@ -176,7 +177,7 @@ def test_deadline_not_passed_gives_document_next_steps():
         today=date(2026, 2, 1),
     )
     assert "before March 18, 2026" in results[1].reply
-    assert not state.human_offered
+    assert state.pending_question == "anything_else"
 
 
 def test_picking_from_a_list_and_switching_claims():
@@ -184,18 +185,93 @@ def test_picking_from_a_list_and_switching_claims():
         [
             {"full_name": "Margaret Chen", "dob": "1985-03-15", "id_last4": "4472"},
             {"case_type": "auto", "intent": "status_inquiry"},
+            {"confirms_case": "yes"},
             {"case_type": "dental", "intent": "payment_question"},
             {"confirms_case": "yes"},
         ],
-        ["Margaret Chen, 1985-03-15, ssn 4472", "the auto one", "what about my dental claim?", "yes"],
+        ["Margaret Chen, 1985-03-15, ssn 4472", "the auto one", "yes", "what about my dental claim?", "yes"],
     )
-    # No hints yet -> list claims; "the auto one" picks from the list directly.
+    # No hints yet -> list claims; picking "the auto one" from the list is confirmed first.
     assert results[0].trace["plan"]["action"] == "ask_which_claim"
-    assert results[1].trace["state"]["selected_case_id"] == "CL-2102"
-    # Switching to a claim inferred from a description is confirmed first.
-    assert results[2].trace["phase_after"] == "RESOLVE_INTENT"
-    assert results[2].trace["plan"]["action"] == "confirm_claim"
-    assert state.selected_case_id == "CL-1899" and "$425.00" in results[3].reply
+    assert results[1].trace["plan"]["action"] == "confirm_claim"
+    assert results[2].trace["state"]["selected_case_id"] == "CL-2102"
+    # Switching to another claim is confirmed too.
+    assert results[3].trace["phase_after"] == "RESOLVE_INTENT"
+    assert results[3].trace["plan"]["action"] == "confirm_claim"
+    assert state.selected_case_id == "CL-1899" and "$425.00" in results[4].reply
+
+
+# --- Regression: yes/no answered the wrong question (live test, 2026-10-02) ---------
+
+
+VERIFIED = {"full_name": "Margaret Chen", "dob": "1985-03-15", "id_last4": "4472"}
+
+
+def test_regression_choosing_by_month_confirms_instead_of_answering():
+    # Caller picked "January 22th" from a list of the 2026 claims. Before the fix the
+    # code silently selected CL-2048 and planned an answer, while the model asked a
+    # confirmation question; the next "yes" was then read as accepting a transfer.
+    state, results, _ = run(
+        [
+            VERIFIED,
+            {"case_year": 2026, "intent": "status_inquiry"},
+            {"case_month": 1},
+            {"confirms_case": "yes", "case_type": "healthcare", "case_month": 1, "case_year": 2026},
+        ],
+        ["Margaret Chen, 1985-03-15, ssn 4472", "my 2026 ones", "Janurary 22th plz", "yes that one"],
+    )
+    pick, confirm = results[2], results[3]
+    assert pick.trace["plan"]["action"] == "confirm_claim"
+    assert pick.reply.endswith("Just to confirm, are you calling about claim CL-2048, a healthcare claim filed on January 12, 2026 (status: denied)?")
+    # "yes that one" confirms the claim; it is NOT a request for a human.
+    assert confirm.trace["phase_after"] == "PROCESS_CASE"
+    assert confirm.trace["plan"]["action"] == "answer_case"
+    assert not state.handoff_requested
+
+
+def test_regression_question_about_transfer_is_answered_not_escalated():
+    state, results, _ = run(
+        [
+            MARGARET_EXTRACTION, {"confirms_case": "yes"}, {"confirms_case": "yes"},
+            {"intent": "general_claim_question", "emotion": "confused"},
+        ],
+        [MARGARET_OPENING, "yes", "yes please", "Why do I have to talk to a human here?"],
+    )
+    accept, why = results[2], results[3]
+    assert accept.trace["phase_after"] == "POST_PROCESS" and state.handoff_requested
+    assert why.trace["plan"]["action"] == "ask_email_again"
+    assert state.phase == Phase.POST_PROCESS  # still waiting on the email question
+    assert any("already passed" in f for f in why.trace["plan"]["facts"])  # can explain why
+
+
+def test_explicit_human_request_during_wrap_up_still_asks_email_first():
+    state, results, _ = run(
+        [MARGARET_EXTRACTION, {"confirms_case": "yes"}, {"wants_to_end": True}, {"wants_human": True}, {"email_consent": "no"}],
+        [MARGARET_OPENING, "yes", "that's all", "actually get me a person", "no"],
+    )
+    assert results[3].trace["plan"]["action"] == "ask_email_again"
+    assert state.phase == Phase.ESCALATED and state.email.consent is False
+
+
+def test_declining_the_human_offer_continues_normally():
+    state, results, _ = run(
+        [MARGARET_EXTRACTION, {"confirms_case": "yes"}, {"confirms_case": "no"}, {"confirms_case": "no"}],
+        [MARGARET_OPENING, "yes", "no thanks", "no"],
+    )
+    assert results[2].trace["plan"]["action"] == "decline_human"
+    assert results[3].trace["phase_after"] == "POST_PROCESS"  # "no" to "anything else?"
+    assert not state.handoff_requested
+
+
+def test_model_cannot_add_its_own_question():
+    state, results, _ = run(
+        [MARGARET_EXTRACTION],
+        [MARGARET_OPENING],
+        reply="Thanks, Margaret, you're verified. Is that the one you're asking about?",
+    )
+    reply = results[0].reply
+    assert reply.count("?") == 1 and reply.endswith("(status: denied)?")
+    assert results[0].trace["response"]["source"] == "llm"
 
 
 def test_email_preview_contains_discussion_outcome_and_next_steps():

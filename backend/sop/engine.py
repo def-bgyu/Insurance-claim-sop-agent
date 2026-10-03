@@ -5,10 +5,13 @@
       -> remember     (store case hints / intent whatever the phase)
       -> guards       (human request, frustration, off-topic limits; any phase)
       -> phase logic  (code decides: verify, resolve claim, answer, wrap up)
-      -> respond      (LLM phrases the plan; grounding guard; fallback text)
+      -> respond      (LLM phrases the plan; grounding guard; fallback text;
+                       code appends the closing question)
       -> trace
 
 The LLM never changes the phase, verifies anyone, or chooses which data to reveal.
+Every question the caller has to answer is written by code, and every yes/no is
+interpreted against `state.pending_question`, the question actually asked.
 """
 
 from collections.abc import Callable
@@ -23,7 +26,7 @@ from backend.llm.provider import LLMProvider
 from backend.llm.responder import respond
 from backend.masking import mask_text, mask_value
 from backend.sop import case_resolution, grounding
-from backend.sop.plan import ResponsePlan
+from backend.sop.plan import Pending, ResponsePlan
 from backend.sop.spec import (
     IDENTITY_FIELD_LABELS,
     IDENTITY_FIELDS,
@@ -47,6 +50,12 @@ ESCALATION_MESSAGES = {
     "representative_not_authorized": "I'm sorry, I can't share information about this policy because you're not listed as an authorized representative on it. I'm connecting you with a human representative who can explain your options. Please hold for a moment.",
     "representative_consent_required": "Thank you. Because you're calling on behalf of the policyholder, their consent is required before I can share any claim information. I'm connecting you with a human representative to complete that step. Please hold for a moment.",
 }
+
+ANYTHING_ELSE_QUESTION = "Is there anything else I can help you with?"
+OFFER_HUMAN_QUESTION = (
+    "Would you like me to connect you with a human claims representative to review your options?"
+)
+WHICH_CLAIM_QUESTION = "Which claim are you calling about?"
 
 
 @dataclass
@@ -80,6 +89,12 @@ def _describe_hints(hints: CaseHints) -> str:
     return text
 
 
+def _answer(ex: Extraction) -> YesNo | None:
+    """The caller's yes/no, whichever field the extractor put it in.
+    What it answers is decided by state.pending_question, not by the field name."""
+    return ex.confirms_case or ex.email_consent
+
+
 class SOPEngine:
     def __init__(
         self,
@@ -102,6 +117,7 @@ class SOPEngine:
 
     def handle(self, state: SessionState, user_text: str) -> TurnResult:
         phase_before = state.phase
+        pending_before = state.pending_question
         last_agent = next((t.text for t in reversed(state.transcript) if t.role == "agent"), None)
         state.transcript.append(Turn(role="user", text=user_text, phase=state.phase))
 
@@ -124,10 +140,13 @@ class SOPEngine:
         if plan.facts and not state.verified:
             raise RuntimeError("SOP violation: claim facts planned for an unverified caller")
 
+        # The question this reply ends with is the one the next yes/no answers.
+        state.pending_question = plan.pending_question
+
         response = respond(self.provider, state, plan)
         state.transcript.append(Turn(role="agent", text=response.text, phase=state.phase))
 
-        trace = self._trace(state, phase_before, user_text, outcome, plan, response)
+        trace = self._trace(state, phase_before, pending_before, user_text, outcome, plan, response)
         self.tracer.write(state.session_id, trace)
         return TurnResult(response.text, trace)
 
@@ -156,17 +175,16 @@ class SOPEngine:
 
     def _guards(self, state: SessionState, ex: Extraction) -> ResponsePlan | None:
         wants_human = ex.wants_human or ex.intent == Intent.SPEAK_TO_HUMAN
-        accepts_offer = (
-            state.human_offered and state.phase == Phase.PROCESS_CASE and ex.confirms_case == YesNo.YES
-        )
+        accepts_offer = state.pending_question == Pending.OFFER_HUMAN and _answer(ex) == YesNo.YES
         if wants_human or accepts_offer:
             if state.phase == Phase.PROCESS_CASE:
                 # Case is handled: wrap up (offer the email) before transferring.
                 state.handoff_requested = True
                 state.transition(Phase.POST_PROCESS)
                 return self._offer_email(state, ex)
-            if state.phase == Phase.POST_PROCESS and (ex.email_consent or ex.confirms_case):
-                # They answered the email question too; _post_process sends it, then transfers.
+            if state.phase == Phase.POST_PROCESS:
+                # Already wrapping up: the transfer happens right after the email
+                # question is answered. Never skip that question.
                 state.handoff_requested = True
             else:
                 return self._escalate(state, "caller_requested_human")
@@ -181,15 +199,17 @@ class SOPEngine:
             state.counters.off_topic += 1
             if state.counters.off_topic >= Limits.OFF_TOPIC:
                 return self._escalate(state, "off_topic_limit")
-            resume_directive, resume_text = self._resume(state)
+            resume_directive, question, pending = self._resume(state)
             return ResponsePlan(
                 action="decline_off_topic",
                 directive=(
                     "The caller asked something unrelated to insurance claims. Do NOT answer it. "
                     "Politely say you can only help with questions about their insurance claims, "
-                    f"then {resume_directive}"
+                    f"and that you'd like to get back to {resume_directive}"
                 ),
-                fallback_text=f"I'm sorry, I can only help with questions about your insurance claims. {resume_text}",
+                fallback_text="I'm sorry, I can only help with questions about your insurance claims.",
+                closing_question=question,
+                pending_question=pending,
                 reasons=[f"off_topic count {state.counters.off_topic}/{Limits.OFF_TOPIC}"],
             )
         return None
@@ -202,32 +222,27 @@ class SOPEngine:
             directive=(
                 "You are transferring the caller to a human representative right now. Say so "
                 f"warmly in 1-2 sentences, conveying this message: \"{message}\" "
-                "Do not mention any limits, counts, or internal rules."
+                "Do not mention any limits, counts, or internal rules. Do not ask any question."
             ),
             fallback_text=message,
             reasons=[reason],
         )
 
-    def _resume(self, state: SessionState) -> tuple[str, str]:
-        """How to steer back to the current step after a detour."""
+    def _resume(self, state: SessionState) -> tuple[str, str, str | None]:
+        """How to steer back after a detour: (topic for the directive, question, pending)."""
         if state.phase == Phase.VERIFY_ID:
-            labels = self._labels(self._missing(state))
-            ask = f"your {_join_or(labels)}"
-            return (
-                f"ask for the identity details still needed: {_join_or(labels)}.",
-                f"To continue, could you please share {ask}?",
-            )
+            return ("verifying their identity.", self._identity_question(state), None)
         if state.phase == Phase.RESOLVE_INTENT:
-            return ("ask which claim they are calling about.", "Which claim are you calling about today?")
+            # Re-ask whatever was open before the detour.
+            if state.pending_question == Pending.CONFIRM_CLAIM and state.candidate_case_ids:
+                claim = self.data.get_claim(state.verified_party_id, state.candidate_case_ids[0])
+                return ("their claim.", self._confirm_question(claim), Pending.CONFIRM_CLAIM)
+            return ("their claim.", WHICH_CLAIM_QUESTION, Pending.CHOOSE_CLAIM)
         if state.phase == Phase.PROCESS_CASE:
-            return (
-                "ask what else they would like to know about their claim.",
-                "Is there anything else I can help you with regarding your claim?",
-            )
-        return (
-            "ask again whether they would like the email summary (yes or no).",
-            "Would you like me to email you a summary of our conversation?",
-        )
+            if state.pending_question == Pending.OFFER_HUMAN:
+                return ("their claim.", OFFER_HUMAN_QUESTION, Pending.OFFER_HUMAN)
+            return ("their claim.", ANYTHING_ELSE_QUESTION, Pending.ANYTHING_ELSE)
+        return ("wrapping up.", self._email_question(state), Pending.OFFER_EMAIL)
 
     # --- Phase logic -------------------------------------------------------------------
 
@@ -255,6 +270,13 @@ class SOPEngine:
 
     def _labels(self, fields: list[IdentityField]) -> list[str]:
         return [IDENTITY_FIELD_LABELS[f] for f in fields]
+
+    def _identity_question(self, state: SessionState) -> str:
+        labels = self._labels(self._missing(state))
+        needed = max(REQUIRED_IDENTITY_MATCHES - len(state.identity), 1)
+        if needed == 1:
+            return f"Could you please share your {_join_or(labels)}?"
+        return f"Could you please share {needed} more of the following: your {_join_or(labels)}?"
 
     def _verify(self, state: SessionState, ex: Extraction) -> ResponsePlan:
         changed, unreadable = False, []
@@ -300,13 +322,11 @@ class SOPEngine:
         unreadable_note = ""
         if unreadable:
             unreadable_note = (
-                f"The {_join_or(self._labels(unreadable))} they gave could not be read; ask them to "
-                "repeat it (for an ID, only the last four digits are needed; for a date of birth, "
-                "the full date). "
+                f"Say the {_join_or(self._labels(unreadable))} they gave could not be read (for an ID, "
+                "only the last four digits are needed; for a date of birth, the full date). "
             )
 
         missing = self._missing(state)
-        labels = self._labels(missing)
 
         if result.evaluated and changed:
             state.counters.verification_failures += 1
@@ -319,46 +339,42 @@ class SOPEngine:
                 return ResponsePlan(
                     action="verification_mismatch",
                     directive=(
-                        f"{tone}Say you weren't able to verify their identity with the details so far. "
-                        "Do NOT say which detail did not match. "
-                        f"{explain_why}Ask them to also provide their {_join_or(labels)}."
+                        f"{tone}Say you weren't able to verify their identity with the details so far, "
+                        "and that one more detail would help. Do NOT say which detail did not match. "
+                        f"{explain_why}"
                     ),
-                    fallback_text=(
-                        "I wasn't able to verify your identity with the details provided so far. "
-                        f"To continue, could you also share your {_join_or(labels)}?"
-                    ),
+                    fallback_text="I wasn't able to verify your identity with the details provided so far.",
+                    closing_question=f"To continue, could you also share your {_join_or(self._labels(missing))}?",
                     reasons=reasons,
                 )
             return ResponsePlan(
                 action="verification_mismatch",
                 directive=(
                     f"{tone}Say you weren't able to verify their identity with those details. Do NOT "
-                    "say which detail did not match. Ask them to double-check the details, using "
-                    "their full legal name and the contact details on file."
+                    "say which detail did not match."
                 ),
-                fallback_text=(
-                    "I'm sorry, I wasn't able to verify your identity with those details. Could you "
-                    "please double-check them, using your full legal name and the contact details on file?"
+                fallback_text="I'm sorry, I wasn't able to verify your identity with those details.",
+                closing_question=(
+                    "Could you please double-check them, using your full legal name and the "
+                    "contact details on file?"
                 ),
                 reasons=reasons,
             )
 
-        needed = max(REQUIRED_IDENTITY_MATCHES - len(state.identity), 1)
         if ex.refuses_to_share:
             reasons.append("caller refused a field; offering alternatives")
         return ResponsePlan(
             action="ask_identity",
             directive=(
                 f"{tone}{explain_why}{noted}{unreadable_note}"
-                f"Ask for {needed} more of these identity details: {_join_or(labels)}. "
-                "If they refused one detail, reassure them that any of the others works instead."
+                "Briefly say you need a few more details to verify their identity. If they refused "
+                "one detail, reassure them that any of the others works instead."
             ),
             fallback_text=(
                 f"{'I understand. ' if tone else 'Thank you. '}"
-                f"{'Claim details are protected, so I need to verify your identity first. ' if explain_why else ''}"
-                f"To verify your identity, could you please share {needed} more of the following: "
-                f"your {_join_or(labels)}?"
+                f"{'Claim details are protected, so I need to verify your identity first.' if explain_why else 'I just need a bit more to verify your identity.'}"
             ),
+            closing_question=self._identity_question(state),
             reasons=reasons,
         )
 
@@ -367,12 +383,33 @@ class SOPEngine:
     def _claims(self, state: SessionState) -> list[Claim]:
         return self.data.list_claims(state.verified_party_id)
 
+    def _confirm_question(self, claim: Claim) -> str:
+        return f"Just to confirm, are you calling about {case_resolution.describe_claim(claim)}?"
+
     def _select(self, state: SessionState, claim: Claim, ex: Extraction, user_text: str) -> ResponsePlan:
         state.selected_case_id = claim.case_id
         state.candidate_case_ids = []
-        state.awaiting_confirmation = False
         state.transition(Phase.PROCESS_CASE)
         return self._process(state, ex, user_text, just_selected=True)
+
+    def _confirm(
+        self, state: SessionState, claim: Claim, ex: Extraction, opener: str, opener_text: str,
+        reasons: list[str],
+    ) -> ResponsePlan:
+        """Every claim inferred from a description is confirmed before it's discussed."""
+        state.candidate_case_ids = [claim.case_id]
+        return ResponsePlan(
+            action="confirm_claim",
+            directive=(
+                f"{self._tone(ex)}{opener}Say you'd like to make sure you have the right claim. "
+                "Do not share any claim details yet."
+            ),
+            fallback_text=opener_text or "Thank you.",
+            facts=[f"Candidate: {case_resolution.describe_claim(claim)}."],
+            closing_question=self._confirm_question(claim),
+            pending_question=Pending.CONFIRM_CLAIM,
+            reasons=reasons,
+        )
 
     def _resolve(
         self, state: SessionState, ex: Extraction, user_text: str, just_verified: bool = False
@@ -380,65 +417,65 @@ class SOPEngine:
         claims = self._claims(state)
         by_id = {c.case_id: c for c in claims}
         opener = "Thank them; their identity is now verified. " if just_verified else ""
-        opener_text = "Thank you, you're verified. " if just_verified else ""
+        opener_text = "Thank you, you're verified." if just_verified else ""
         turn_hints = _hints_from(ex)
 
-        if state.awaiting_confirmation and state.candidate_case_ids:
-            if ex.confirms_case == YesNo.YES:
-                return self._select(state, by_id[state.candidate_case_ids[0]], ex, user_text)
-            if ex.confirms_case == YesNo.NO:
-                state.awaiting_confirmation = False
+        if state.pending_question == Pending.CONFIRM_CLAIM and state.candidate_case_ids:
+            candidate = by_id[state.candidate_case_ids[0]]
+            # "Yes that one" may come with hints restating the claim; only a contradiction
+            # (e.g. "yes, the dental one" when we asked about healthcare) blocks the yes.
+            consistent = bool(case_resolution.match_claims([candidate], turn_hints)) or not (
+                case_resolution.has_hints(turn_hints)
+            )
+            if _answer(ex) == YesNo.YES and consistent:
+                return self._select(state, candidate, ex, user_text)
+            if _answer(ex) == YesNo.NO or not consistent:
                 state.candidate_case_ids = []
                 state.hints = turn_hints  # forget the wrong guess, keep only what was just said
 
+        # The caller named an exact claim ID: no need to confirm.
+        if turn_hints.case_id and turn_hints.case_id in by_id:
+            return self._select(state, by_id[turn_hints.case_id], ex, user_text)
+
         # Choosing among a list we offered: match this turn's words against those claims only.
-        if state.candidate_case_ids and case_resolution.has_hints(turn_hints):
-            offered = [by_id[i] for i in state.candidate_case_ids]
+        if state.pending_question == Pending.CHOOSE_CLAIM and case_resolution.has_hints(turn_hints):
+            offered = [by_id[i] for i in state.candidate_case_ids if i in by_id]
             picked = case_resolution.match_claims(offered, turn_hints)
             if len(picked) == 1:
-                return self._select(state, picked[0], ex, user_text)
+                return self._confirm(
+                    state, picked[0], ex, opener, opener_text, ["picked from offered list"]
+                )
 
         if not case_resolution.has_hints(state.hints):
-            return self._list_claims(state, claims, opener, opener_text, "ask_which_claim")
+            return self._list_claims(state, claims, ex, opener, opener_text, "ask_which_claim")
 
         matches = case_resolution.match_claims(claims, state.hints)
         if len(matches) == 1:
-            if state.hints.case_id:  # the caller named the exact claim
-                return self._select(state, matches[0], ex, user_text)
-            state.candidate_case_ids = [matches[0].case_id]
-            state.awaiting_confirmation = True
-            label = case_resolution.describe_claim(matches[0])
             remembered = (
                 f"Mention you're following up on the {_describe_hints(state.hints)} they mentioned earlier. "
                 if just_verified else ""
             )
-            return ResponsePlan(
-                action="confirm_claim",
-                directive=(
-                    f"{self._tone(ex)}{opener}{remembered}Ask them to confirm this is the right claim: "
-                    f"{label}. Do not share any other claim details yet."
-                ),
-                fallback_text=f"{opener_text}Just to confirm, are you calling about {label}?",
-                facts=[f"Candidate: {label}."],
-                reasons=["one claim matches remembered hints", _describe_hints(state.hints)],
+            return self._confirm(
+                state, matches[0], ex, opener + remembered, opener_text,
+                ["one claim matches remembered hints", _describe_hints(state.hints)],
             )
         if len(matches) > 1:
-            state.candidate_case_ids = [c.case_id for c in matches]
-            return self._list_claims(state, matches, opener, opener_text, "choose_claim")
+            return self._list_claims(state, matches, ex, opener, opener_text, "choose_claim")
 
         # Nothing matches what they described: say so and show what they do have.
         described = _describe_hints(state.hints)
         state.hints = CaseHints()
-        plan = self._list_claims(state, claims, opener, opener_text, "no_matching_claim")
+        plan = self._list_claims(state, claims, ex, opener, opener_text, "no_matching_claim")
         plan.directive = f"Say you couldn't find a {described} on their account. " + plan.directive
         plan.fallback_text = (
-            f"{opener_text}I couldn't find a {described} on your account. "
-            + plan.fallback_text.removeprefix(opener_text)
-        )
+            f"{opener_text} I couldn't find a {described} on your account. "
+            + plan.fallback_text.removeprefix(opener_text).strip()
+        ).strip()
         return plan
 
     def _list_claims(
-        self, state: SessionState, claims: list[Claim], opener: str, opener_text: str, action: str
+        self, state: SessionState, claims: list[Claim], ex: Extraction, opener: str,
+        opener_text: str, action: str,
     ) -> ResponsePlan:
         claims = sorted(claims, key=lambda c: c.created_at, reverse=True)
         state.candidate_case_ids = [c.case_id for c in claims]
@@ -447,11 +484,13 @@ class SOPEngine:
         return ResponsePlan(
             action=action,
             directive=(
-                f"{opener}Ask which claim they are calling about. List these claims briefly: "
-                f"{listing}. Do not share any other claim details yet."
+                f"{self._tone(ex)}{opener}Briefly list these claims on their account so they can "
+                f"choose: {listing}. Do not share any other claim details yet."
             ),
-            fallback_text=f"{opener_text}I see these claims on your account: {listing}. Which one are you calling about?",
+            fallback_text=f"{opener_text} I see these claims on your account: {listing}.".strip(),
             facts=[f"Claim on account: {label}." for label in labels],
+            closing_question=WHICH_CLAIM_QUESTION,
+            pending_question=Pending.CHOOSE_CLAIM,
             reasons=[f"{len(claims)} claims to choose from"],
         )
 
@@ -461,11 +500,30 @@ class SOPEngine:
         self, state: SessionState, ex: Extraction, user_text: str, just_selected: bool = False
     ) -> ResponsePlan:
         claim = self.data.get_claim(state.verified_party_id, state.selected_case_id)
+        new_question = bool(ex.intent and ex.intent != Intent.UNKNOWN) or bool(ex.followup_topic)
 
         if not just_selected:
-            if ex.wants_to_end and not ex.intent:
+            done = ex.wants_to_end or (
+                state.pending_question == Pending.ANYTHING_ELSE and _answer(ex) == YesNo.NO
+            )
+            if done and not new_question:
                 state.transition(Phase.POST_PROCESS)
                 return self._offer_email(state, ex)
+
+            if (
+                state.pending_question == Pending.OFFER_HUMAN
+                and _answer(ex) == YesNo.NO
+                and not new_question
+            ):
+                return ResponsePlan(
+                    action="decline_human",
+                    directive=f"{self._tone(ex)}Say that's no problem.",
+                    fallback_text="No problem.",
+                    closing_question=ANYTHING_ELSE_QUESTION,
+                    pending_question=Pending.ANYTHING_ELSE,
+                    reasons=["caller declined the human transfer"],
+                )
+
             turn_hints = _hints_from(ex)
             switching = (turn_hints.case_id and turn_hints.case_id != claim.case_id) or (
                 turn_hints.case_type and turn_hints.case_type != claim.case_type
@@ -488,14 +546,13 @@ class SOPEngine:
         facts = answer.facts + [f"Next step: {s}" for s in answer.next_steps]
 
         human = ""
-        closing = "Is there anything else I can help you with?"
+        closing, pending = ANYTHING_ELSE_QUESTION, Pending.ANYTHING_ELSE
         if answer.needs_human:
-            state.human_offered = True
             human = (
-                "Explain that, according to the records, the appeal deadline has passed, and offer "
-                "to connect them with a human claims representative who can review their options. "
+                "Explain that, according to the records, the appeal deadline has passed, so a "
+                "human claims representative needs to review their options. "
             )
-            closing = "Would you like me to connect you with a human claims representative to review your options?"
+            closing, pending = OFFER_HUMAN_QUESTION, Pending.OFFER_HUMAN
 
         return ResponsePlan(
             action="answer_case",
@@ -503,10 +560,11 @@ class SOPEngine:
                 f"{self._tone(ex)}{'Thank them for confirming. ' if just_selected else ''}"
                 f"The caller's question is about: {intent.value.replace('_', ' ')}. Answer it "
                 f"naturally using ONLY the FACTS. {human}"
-                f"End by asking: \"{closing}\""
             ),
-            fallback_text=" ".join(facts) + " " + closing,
+            fallback_text=" ".join(facts),
             facts=facts,
+            closing_question=closing,
+            pending_question=pending,
             reasons=[f"intent={intent.value}", f"topics={answer.topics_used}", f"needs_human={answer.needs_human}"],
         )
 
@@ -516,9 +574,21 @@ class SOPEngine:
         email = self.data.get_policyholder(state.verified_party_id).email
         return mask_value(IdentityField.EMAIL, email)
 
+    def _email_question(self, state: SessionState) -> str:
+        return (
+            "Would you like me to email you a summary of our conversation, including your claim "
+            f"status and next steps, to {self._masked_email(state)}?"
+        )
+
+    def _wrap_up_facts(self, state: SessionState) -> list[str]:
+        """What was established in this call, so wrap-up questions can still be answered."""
+        if not state.discussed:
+            return []
+        last = state.discussed[-1]
+        return last.facts + [f"Next step: {s}" for s in last.next_steps]
+
     def _offer_email(self, state: SessionState, ex: Extraction) -> ResponsePlan:
         state.email.offered = True
-        address = self._masked_email(state)
         handoff = (
             "Tell them you'll connect them with a human representative right after this. "
             if state.handoff_requested else ""
@@ -530,30 +600,32 @@ class SOPEngine:
         return ResponsePlan(
             action="offer_email",
             directive=(
-                f"{self._tone(ex)}{handoff}Offer to email them a summary of this conversation (what "
-                "was discussed, the claim status, and next steps) to the email address on file, "
-                f"{address}. Mention they can see it first with the 'Preview email' button. Ask yes or no."
+                f"{self._tone(ex)}{handoff}Say you can email them a summary of this conversation "
+                "(what was discussed, the claim status, and next steps), and that they can see it "
+                "first with the 'Preview email' button."
             ),
-            fallback_text=(
-                f"{handoff_text}Would you like me to email you a summary of our conversation, "
-                f"including your claim status and next steps, to {address}? You can check it first "
-                "with the 'Preview email' button."
-            ),
-            reasons=["case handled; offering email summary"],
+            fallback_text=f"{handoff_text}You can check the summary first with the 'Preview email' button.",
+            facts=self._wrap_up_facts(state),
+            closing_question=self._email_question(state),
+            pending_question=Pending.OFFER_EMAIL,
+            reasons=["case handled; offering email summary", f"handoff={state.handoff_requested}"],
         )
 
     def _post_process(self, state: SessionState, ex: Extraction) -> ResponsePlan:
-        answer = ex.email_consent or ex.confirms_case
+        answer = _answer(ex) if state.pending_question == Pending.OFFER_EMAIL else None
         if answer is None:
             return ResponsePlan(
                 action="ask_email_again",
                 directive=(
-                    f"{self._tone(ex)}Before wrapping up, ask clearly whether they would like the "
-                    "email summary sent: yes or no. If they asked something else, say you can help "
-                    "with that in a new conversation."
+                    f"{self._tone(ex)}If the caller asked a question, answer it briefly using ONLY "
+                    "the FACTS (for example, why a human representative is needed). Otherwise just "
+                    "say you'd like to wrap up."
                 ),
-                fallback_text="Before we wrap up, would you like me to send you the email summary? Please answer yes or no.",
-                reasons=["email consent unclear"],
+                fallback_text="Before we wrap up:",
+                facts=self._wrap_up_facts(state),
+                closing_question=self._email_question(state),
+                pending_question=Pending.OFFER_EMAIL,
+                reasons=["email consent not answered yet"],
             )
 
         state.email.consent = answer == YesNo.YES
@@ -569,24 +641,30 @@ class SOPEngine:
             goodbye = "Thank you for calling, and have a great day."
         return ResponsePlan(
             action="close",
-            directive=f"Confirm this to the caller and close the conversation: \"{sent}{goodbye}\"",
+            directive=(
+                f"Confirm this to the caller and close the conversation: \"{sent}{goodbye}\" "
+                "Do not ask any question."
+            ),
             fallback_text=sent + goodbye,
             reasons=[f"email consent={state.email.consent}", f"handoff={state.handoff_requested}"],
         )
 
     # --- Trace -------------------------------------------------------------------------
 
-    def _trace(self, state, phase_before, user_text, outcome, plan, response) -> dict:
+    def _trace(self, state, phase_before, pending_before, user_text, outcome, plan, response) -> dict:
         record = {
             "turn": sum(1 for t in state.transcript if t.role == "user"),
             "phase_before": phase_before.value,
             "phase_after": state.phase.value,
+            "pending_question_before": pending_before,
             "user_text": mask_text(user_text),
             "plan": {
                 "action": plan.action,
                 "reasons": plan.reasons,
                 "directive": mask_text(plan.directive),
                 "facts": plan.facts,
+                "closing_question": mask_text(plan.closing_question or ""),
+                "pending_question": plan.pending_question,
             },
             "response": {
                 "source": response.source,

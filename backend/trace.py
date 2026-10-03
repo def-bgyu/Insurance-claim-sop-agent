@@ -27,7 +27,7 @@ def public_snapshot(state: SessionState) -> dict:
         "policy_number_hint": state.policy_number_hint,
         "intent": state.intent.value if state.intent else None,
         "candidate_case_ids": state.candidate_case_ids,
-        "awaiting_case_confirmation": state.awaiting_confirmation,
+        "pending_question": state.pending_question,
         "selected_case_id": state.selected_case_id,
         "counters": state.counters.model_dump(),
         "email": state.email.model_dump(),

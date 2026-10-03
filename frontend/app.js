@@ -160,7 +160,7 @@ function renderState(state) {
       ["Policy number hint", state.policy_number_hint],
       ["Intent", state.intent],
       ["Candidate claims", state.candidate_case_ids.join(", ") || "—"],
-      ["Awaiting confirmation", String(state.awaiting_case_confirmation)],
+      ["Pending question", state.pending_question],
       ["Selected claim", state.selected_case_id],
     ])),
     section("Escalation counters", kv([

@@ -71,13 +71,15 @@ class SessionState(BaseModel):
     policy_number_hint: str | None = None  # a lookup hint only; never counts toward ID
     intent: Intent | None = None
 
-    # Case selection. awaiting_confirmation = we asked "is it claim X?" and wait for yes/no.
+    # Case selection.
     candidate_case_ids: list[str] = Field(default_factory=list)
-    awaiting_confirmation: bool = False
     selected_case_id: str | None = None
 
+    # The question the agent's last message ended with (see plan.Pending). Every
+    # yes/no answer is interpreted against this and nothing else.
+    pending_question: str | None = None
+
     discussed: list[DiscussedItem] = Field(default_factory=list)
-    human_offered: bool = False  # we offered a transfer; a "yes" next turn accepts it
     handoff_requested: bool = False  # caller wants a human after their case was handled
 
     counters: Counters = Field(default_factory=Counters)

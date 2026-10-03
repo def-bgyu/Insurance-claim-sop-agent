@@ -42,7 +42,7 @@ Fields:
 - emotion: "neutral", "frustrated", "angry", "anxious", or "confused"
 - refuses_to_share: true if the caller refuses to provide requested information
 - off_topic: true ONLY if the message is unrelated to insurance, claims, their policy, or this call (e.g. trivia, coding, weather). Greetings, small talk about their situation, or complaints about the process are NOT off topic.
-- wants_human: true if the caller asks for a human, agent, supervisor, or representative
+- wants_human: true ONLY if the caller asks to be transferred to or to speak with a human, agent, supervisor, or representative ("can I talk to a person?", "transfer me"). A question or complaint ABOUT a transfer ("why do I have to talk to a human?") is false.
 - wants_to_end: true if the caller indicates they are done ("no that's all", "thanks, bye")
 
 Example:

@@ -5,6 +5,44 @@ inspected (`git show <commit>`) or rolled back (`git revert <commit>`).
 
 ---
 
+## 0.2.0: Yes/no answers are always matched to the question actually asked
+
+**Bug found in live testing (Haiku 4.5, trace `9c405e18…`).** The caller picked a
+claim by saying "January 22th". The code silently selected CL-2048 (the only
+January claim) and planned an answer ending with "Would you like a human
+representative?", but Haiku instead asked "is this the right claim?" (it noticed
+the 22nd vs. 12th mismatch). The caller's "yes that one" was then read as
+accepting a human transfer, and "Why do I have to talk to a human here?" was
+misread as a request for one, which escalated the call.
+
+**Root cause:** the code didn't control which question was on screen, so the
+state and the caller could disagree about what a "yes" meant.
+
+**Changes**
+1. **Code writes the closing question** (`ResponsePlan.closing_question`). The
+   LLM writes only the body; the responder strips any trailing question the model
+   adds and appends the code's question word for word. *Why:* what the caller is
+   asked always matches what the state expects.
+2. **One `pending_question` in state** (`confirm_claim`, `choose_claim`,
+   `anything_else`, `offer_human`, `offer_email`) replaces the separate
+   `awaiting_confirmation` / `human_offered` flags. Every yes/no is interpreted
+   against it. A "yes" with hints that merely restate the candidate claim still
+   confirms; only contradicting hints block it.
+3. **Every inferred claim is confirmed**, including picks from a list ("the
+   January one", "the auto one"). Only an exact claim ID skips confirmation.
+   *Why:* would have caught the 22nd vs. 12th mismatch in code. Costs one turn.
+4. **`wants_human` only for an actual request.** The extractor prompt now says a
+   question or complaint about a transfer is not a request. During wrap-up, a
+   human request never skips the email question; the agent can explain why a human
+   is needed using the facts already established (new `_wrap_up_facts`).
+
+Also: "no" to "anything else?" now ends the case (previously only "that's all"
+did), and declining the human offer continues normally.
+
+Tests: 5 regression tests replay the failing conversation and its variations.
+
+---
+
 ## 0.1.0: Initial SOP harness (baseline)
 
 The first working version. Key design decisions, all made before writing code:
