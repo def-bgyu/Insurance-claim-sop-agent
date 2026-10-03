@@ -25,7 +25,9 @@ and phrases replies, and every reply is checked by code before it's sent.
 
 ## Demo
 
-▶️ **[Watch the 1-minute demo](docs/media/sop-agent-demo.mp4)**
+▶️ **[Watch the 1-minute demo]**
+
+
 
 
 
