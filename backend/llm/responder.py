@@ -34,6 +34,7 @@ class ResponseOutcome:
     source: str  # "llm" | "fallback"
     guard_violations: list[str]
     llm: LLMResult | None
+    retried: bool = False  # a second attempt was made after a wrong name
 
 
 def _money_values(text: str) -> set[float]:
@@ -110,6 +111,35 @@ def _finish(body: str, plan: ResponsePlan) -> str:
     return f"{body} {plan.closing_question}".strip()
 
 
+def name_violations(reply: str, plan: ResponsePlan) -> list[str]:
+    """Names the caller mentioned that aren't the verified customer's (or any name,
+    before verification). Matched case-sensitively as capitalized words."""
+    return [
+        f"wrong name {name}"
+        for name in plan.forbidden_names
+        if re.search(rf"\b{re.escape(name)}\b", reply)
+    ]
+
+
+def _generate(
+    provider: LLMProvider, state: SessionState, plan: ResponsePlan, directive: str
+) -> tuple[str, LLMResult, list[str]]:
+    """One model attempt: (cleaned body, raw result, violations)."""
+    system = prompts.responder_system(directive, plan.facts, plan.verified_name, plan.address_as)
+    result = provider.complete(system, _history(state), max_tokens=500)
+    if result.error or not result.text.strip():
+        return "", result, ["llm_error"]
+    body = clean_reply(result.text)
+    if plan.closing_question:
+        body = strip_trailing_questions(body)
+    if not body:
+        return "", result, ["empty"]
+    violations = (
+        grounding_violations(body, plan) + action_violations(body, plan) + name_violations(body, plan)
+    )
+    return body, result, violations
+
+
 def respond(provider: LLMProvider, state: SessionState, plan: ResponsePlan) -> ResponseOutcome:
     fallback = _finish(plan.fallback_text, plan)
     if not plan.use_llm:
@@ -121,15 +151,26 @@ def respond(provider: LLMProvider, state: SessionState, plan: ResponsePlan) -> R
             "\nDo NOT end with a question. The system will append this exact question after "
             f'your message: "{plan.closing_question}"'
         )
-    system = prompts.responder_system(directive, plan.facts)
-    result = provider.complete(system, _history(state), max_tokens=500)
-    if result.error or not result.text.strip():
-        return ResponseOutcome(fallback, "fallback", ["llm_error"], result)
+    body, result, violations = _generate(provider, state, plan, directive)
 
-    body = clean_reply(result.text)
-    if plan.closing_question:
-        body = strip_trailing_questions(body)
-    violations = grounding_violations(body, plan) + action_violations(body, plan)
-    if violations or not body:
-        return ResponseOutcome(fallback, "fallback", violations or ["empty"], result)
+    # A wrong name is the one mistake worth a second try: the rest of the reply is
+    # usually fine, and the fallback would lose its natural tone.
+    wrong_names = [v for v in violations if v.startswith("wrong name")]
+    if wrong_names and len(wrong_names) == len(violations):
+        fix = (
+            f"address the caller as {plan.address_as} or without a name"
+            if plan.address_as else "do not address the caller by any name"
+        )
+        retry_directive = (
+            f"{directive}\nIMPORTANT: your previous draft used a name that is not the verified "
+            f"customer's ({', '.join(v.removeprefix('wrong name ') for v in wrong_names)}). "
+            f"Write the reply again and {fix}."
+        )
+        body, result, violations = _generate(provider, state, plan, retry_directive)
+        if violations:
+            return ResponseOutcome(fallback, "fallback", wrong_names + violations, result, retried=True)
+        return ResponseOutcome(_finish(body, plan), "llm", wrong_names, result, retried=True)
+
+    if violations:
+        return ResponseOutcome(fallback, "fallback", violations, result)
     return ResponseOutcome(_finish(body, plan), "llm", [], result)

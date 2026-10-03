@@ -418,6 +418,47 @@ def test_no_match_does_not_reveal_other_claims():
     _no_claim_details(r.reply)
 
 
+# --- Regression: wrong name after another identity was mentioned (live test) ---------
+
+YAVEN = {"full_name": "Yaven Li"}
+YAVEN_REST = {"id_last4": "5317", "dob": "1989-12-03"}
+MARGARET_IDENTITY = {"full_name": "Margaret Chen", "dob": "1985-03-15", "id_last4": "4472"}
+
+
+def test_regression_wrong_name_is_retried_once():
+    state, results, provider = run(
+        [YAVEN, YAVEN_REST, MARGARET_IDENTITY],
+        ["Hello I am yaven li", "5317, 1989-12-03", MARGARET_OPENING],
+        reply=[
+            "Thanks, Yaven. I just need a bit more.",  # unverified: no names allowed
+            "Thanks. I just need a bit more.",  # retry OK
+            "Thank you, Ya Wen. I don't see any existing claims with us.",  # verified name: OK
+            "I appreciate those details, Margaret.",  # wrong person
+            "I appreciate those details, Ya Wen.",  # retry OK
+        ],
+    )
+    first, verified, switched = results
+    assert first.trace["response"]["retried"] and first.trace["response"]["source"] == "llm"
+    assert "Yaven" not in first.reply
+    assert not verified.trace["response"]["retried"]
+    assert switched.trace["response"]["retried"] and "Ya Wen" in switched.reply
+    assert "Margaret" not in switched.reply
+    assert "The verified customer is Ya Wen Li" in provider.responder_systems[-1]
+    assert state.verified_party_id == "P13"  # the session never switches accounts
+
+
+def test_wrong_name_twice_falls_back_to_a_reply_without_names():
+    state, results, _ = run(
+        [YAVEN, YAVEN_REST, MARGARET_IDENTITY],
+        ["Hello I am yaven li", "5317, 1989-12-03", MARGARET_OPENING],
+        reply=["Okay.", "Okay.", "Hello, Margaret.", "Hello again, Margaret."],
+    )
+    switched = results[2]
+    assert switched.trace["response"]["source"] == "fallback"
+    assert switched.trace["response"]["retried"]
+    assert "Margaret" not in switched.reply
+
+
 def test_email_preview_contains_discussion_outcome_and_next_steps():
     state, _, _ = run(
         [MARGARET_EXTRACTION, {"confirms_case": "yes"}, {"wants_to_end": True}],

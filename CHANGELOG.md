@@ -5,6 +5,31 @@ inspected (`git show <commit>`) or rolled back (`git revert <commit>`).
 
 ---
 
+## 0.5.0: The agent only uses the verified customer's name
+
+**Found in live testing.** Verified as Ya Wen Li (alias "Yaven Li"), the caller
+then pasted Margaret Chen's details. The session correctly stayed on Ya Wen's
+account (no data exposed), but the agent started calling the caller "Margaret".
+**Cause:** the responder was never told who the verified customer was, so it
+took the most recent name from the chat.
+
+**Changes** (agreed with Nidhi: retry once, then fallback)
+1. **After verification**, the responder is given the customer's name from the
+   record and told to address them only by it (given name, e.g. "Ya Wen").
+2. **Before verification**, the agent doesn't address the caller by name at all,
+   since any name typed then is unconfirmed.
+3. **Name guard** (`responder.name_violations`): every name the caller mentions is
+   remembered (`state.names_mentioned`). A reply using one that isn't the verified
+   customer's (or any of them, before verification) is **regenerated once** with a
+   correction; if the retry is still wrong, the safe fallback (which never contains
+   names) is sent. Traces show `retried: true` when this happens.
+
+Not changed (discussed, deferred): the chat can close on a message that asks a
+question while the model appended its own question to the goodbye; and a second
+identity after verification isn't called out explicitly.
+
+---
+
 ## 0.4.0: Claims are never listed; the caller describes the claim
 
 **Feedback from live testing.** Right after verification the agent listed every

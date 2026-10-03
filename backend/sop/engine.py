@@ -14,6 +14,7 @@ Every question the caller has to answer is written by code, and every yes/no is
 interpreted against `state.pending_question`, the question actually asked.
 """
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
@@ -149,6 +150,7 @@ class SOPEngine:
 
         # The question this reply ends with is the one the next yes/no answers.
         state.pending_question = plan.pending_question
+        self._apply_name_policy(state, plan)
 
         response = respond(self.provider, state, plan)
         state.transcript.append(Turn(role="agent", text=response.text, phase=state.phase))
@@ -170,6 +172,9 @@ class SOPEngine:
                 setattr(hints, attr, value)
         if ex.policy_number:
             state.policy_number_hint = ex.policy_number
+        for name in (ex.full_name, ex.representative_name):
+            if name and name not in state.names_mentioned:
+                state.names_mentioned.append(name)
         if ex.intent and ex.intent not in (Intent.UNKNOWN, Intent.SPEAK_TO_HUMAN):
             state.intent = ex.intent
         if state.phase == Phase.VERIFY_ID:
@@ -177,6 +182,23 @@ class SOPEngine:
                 state.caller_role = "representative"
             if ex.representative_name:
                 state.representative_name = ex.representative_name
+
+    def _apply_name_policy(self, state: SessionState, plan: ResponsePlan) -> None:
+        """Before verification: no names (any name typed is unconfirmed). After: only the
+        name on record. Any other name the caller mentioned is forbidden in the reply."""
+        mentioned = {
+            token.capitalize()
+            for name in state.names_mentioned
+            for token in re.findall(r"[A-Za-z][A-Za-z'-]+", name)
+        }
+        if not state.verified:
+            plan.forbidden_names = sorted(mentioned)
+            return
+        holder = self.data.get_policyholder(state.verified_party_id)
+        own = {t.lower() for n in holder.all_names for t in n.split()}
+        plan.verified_name = holder.name
+        plan.address_as = " ".join(holder.name.split()[:-1]) or holder.name  # given name(s)
+        plan.forbidden_names = sorted(t for t in mentioned if t.lower() not in own)
 
     # --- Cross-cutting guards ----------------------------------------------------------
 
@@ -869,6 +891,7 @@ class SOPEngine:
             "response": {
                 "source": response.source,
                 "guard_violations": response.guard_violations,
+                "retried": response.retried,
                 "llm_latency_ms": response.llm.latency_ms if response.llm else None,
                 "llm_error": response.llm.error if response.llm else None,
             },

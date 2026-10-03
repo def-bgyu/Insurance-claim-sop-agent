@@ -13,9 +13,11 @@ class ScriptedProvider:
     name = "scripted"
     model = "scripted"
 
-    def __init__(self, extractions: list[dict], reply: str | None = None):
+    def __init__(self, extractions: list[dict], reply: str | list[str] | None = None):
         self.extractions = deque(extractions)
-        self.reply = reply
+        # A list of replies is consumed one per responder call (to test retries).
+        self.replies = deque(reply) if isinstance(reply, list) else None
+        self.reply = None if isinstance(reply, list) else reply
         self.responder_systems: list[str] = []
 
     def complete(self, system: str, messages: list[Message], max_tokens: int = 1024) -> LLMResult:
@@ -23,6 +25,7 @@ class ScriptedProvider:
             data = self.extractions.popleft() if self.extractions else {}
             return LLMResult(text=f"<json>{json.dumps(data)}</json>", model=self.model, latency_ms=0)
         self.responder_systems.append(system)
-        if self.reply is None:
+        reply = self.replies.popleft() if self.replies else self.reply
+        if reply is None:
             return LLMResult(text="", model=self.model, latency_ms=0, error="scripted: use fallback")
-        return LLMResult(text=self.reply, model=self.model, latency_ms=0)
+        return LLMResult(text=reply, model=self.model, latency_ms=0)

@@ -32,3 +32,9 @@ class ResponsePlan:
     pending_question: str | None = None
     reasons: list[str] = field(default_factory=list)  # why code chose this (for traces)
     use_llm: bool = True  # False -> send fallback_text as-is (e.g. after the call ended)
+
+    # Names (set by the engine on every turn). Before verification the caller is not
+    # addressed by name; after, only by the verified customer's name from the record.
+    verified_name: str | None = None  # full name on record
+    address_as: str | None = None  # e.g. "Margaret"
+    forbidden_names: list[str] = field(default_factory=list)  # names the reply must not use

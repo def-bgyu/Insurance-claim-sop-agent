@@ -64,6 +64,7 @@ class SessionState(BaseModel):
     # Identity: normalized values the caller has given us (never echoed back raw).
     identity: dict[IdentityField, str] = Field(default_factory=dict)
     verified_party_id: str | None = None
+    names_mentioned: list[str] = Field(default_factory=list)  # every name the caller gave
     caller_role: str = "policyholder"  # "policyholder" | "representative"
     representative_name: str | None = None
 
