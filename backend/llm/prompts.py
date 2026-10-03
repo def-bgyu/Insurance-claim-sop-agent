@@ -7,9 +7,6 @@ is allowed.
 
 from backend.sop.spec import INTENT_DESCRIPTIONS, Intent
 
-AGENT_NAME = "Alex"
-COMPANY = "Summit Mutual Insurance"
-
 # --- Extractor ------------------------------------------------------------------------
 
 _EXTRACTOR_TEMPLATE = """You extract structured information from ONE message sent by a caller to an insurance claims support line. You do not reply to the caller.
@@ -67,7 +64,7 @@ def extractor_system(phase: str, last_agent_message: str | None, topics: list[st
 
 # --- Responder ------------------------------------------------------------------------
 
-_RESPONDER_TEMPLATE = """You are {agent}, a customer service representative on the claims support line of {company}. You are chatting with a caller. Write ONLY your next message to the caller.
+_RESPONDER_TEMPLATE = """You are a virtual assistant on an insurance company's claims support line. You are chatting with a caller. Write ONLY your next message to the caller. Do not give yourself a name or name the company.
 
 How you speak:
 - Warm, calm, professional, and concise: usually 1-4 sentences. Plain text, no markdown, no lists unless listing claims.
@@ -112,13 +109,13 @@ def responder_system(
     else:
         name_rule = "The caller's identity is not verified yet. Do not address them by any name."
     return _RESPONDER_TEMPLATE.format(
-        agent=AGENT_NAME, company=COMPANY, directive=directive, facts=facts_text, name_rule=name_rule
+        directive=directive, facts=facts_text, name_rule=name_rule
     )
 
 
 GREETING = (
-    f"Hi, thank you for calling {COMPANY} claims support. My name is {AGENT_NAME}. "
+    "Hi, thank you for calling claims support. I'll be your virtual assistant today. "
     "Before I can look into anything, I need to verify your identity. Could you please "
-    "share at least three of the following: your full legal name, date of birth, phone "
+    "share a few of the following: your full legal name, date of birth, phone "
     "number on file, email address on file, or the last four digits of your SSN or national ID?"
 )

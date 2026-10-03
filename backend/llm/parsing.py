@@ -12,7 +12,6 @@ from dataclasses import dataclass
 
 from backend.llm.sanitize import strip_reasoning
 
-
 @dataclass
 class ParseResult:
     data: dict | None

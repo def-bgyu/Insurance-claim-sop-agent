@@ -26,7 +26,7 @@ def strip_reasoning(text: str) -> str:
 def clean_reply(text: str) -> str:
     """For text shown to the caller: no reasoning, no wrapper quotes/labels, bounded length."""
     text = strip_reasoning(text)
-    text = re.sub(r"^(agent|assistant|alex)\s*:\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^(agent|assistant)\s*:\s*", "", text, flags=re.IGNORECASE)
     if len(text) >= 2 and text[0] == text[-1] == '"':
         text = text[1:-1].strip()
     if len(text) > MAX_REPLY_CHARS:

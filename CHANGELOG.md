@@ -5,6 +5,21 @@ inspected (`git show <commit>`) or rolled back (`git revert <commit>`).
 
 ---
 
+## 0.7.1: No agent or company name; softer greeting; small-model comparison dropped
+
+- **No agent name or demo company** (Nidhi): the greeting introduces a "virtual
+  assistant" for "claims support", and the responder prompt no longer names the
+  agent or company and tells the model not to invent either. Fixed a crash this
+  first caused: the prompt template still referenced the removed name/company
+  (`KeyError: 'agent'` on every reply).
+- **Greeting doesn't state the "3 of 5" rule**: it asks for "a few of the
+  following". The rule itself is unchanged and enforced in code.
+- **Decision:** the planned small-vs-large model comparison is dropped; it doesn't
+  add much for this problem statement. The provider interface and parser fallback
+  chain stay, since they make the Haiku setup more robust on their own.
+
+---
+
 ## 0.7.0: Representative consent, answered by the simulated policyholder
 
 Resolves the open `TODO(consent)`. Before, an authorized representative (David Chen
