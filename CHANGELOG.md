@@ -5,6 +5,15 @@ inspected (`git show <commit>`) or rolled back (`git revert <commit>`).
 
 ---
 
+## 0.6.1: Masking moved into the trace module
+
+Refactor, no behavior change (requested by Nidhi). `mask_value` and `mask_text`
+moved from `backend/masking.py` into `backend/trace.py`, next to the code that
+writes traces and the state snapshot; `masking.py` deleted. Imports updated in
+`engine.py` and `tests/test_llm_layer.py`.
+
+---
+
 ## 0.6.0: Personal details are never changed; final messages are exact
 
 **Found in live testing.** At the email step Margaret said "Yes, can you send it to

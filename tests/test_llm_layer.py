@@ -5,7 +5,7 @@ import pytest
 from backend.llm.extractor import FIELD_NAMES, coerce_extraction, regex_prepass
 from backend.llm.parsing import parse_json_object
 from backend.llm.sanitize import clean_reply
-from backend.masking import mask_text
+from backend.trace import mask_text
 
 # --- Parser fallback chain ----------------------------------------------------------
 

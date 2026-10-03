@@ -25,7 +25,6 @@ from backend.llm import prompts
 from backend.llm.extractor import Emotion, Extraction, YesNo, extract
 from backend.llm.provider import LLMProvider
 from backend.llm.responder import respond
-from backend.masking import mask_text, mask_value
 from backend.sop import case_resolution, grounding
 from backend.sop.plan import Pending, ResponsePlan
 from backend.sop.spec import (
@@ -40,7 +39,7 @@ from backend.sop.spec import (
 from backend.sop.state import CaseHints, DiscussedItem, SessionState, Turn
 from backend.sop.normalize import normalize_email
 from backend.sop.verification import normalize_identity_value, verify_identity
-from backend.trace import TraceWriter, mask_fields, public_snapshot
+from backend.trace import TraceWriter, mask_fields, mask_text, mask_value, public_snapshot
 
 _UPSET = {Emotion.FRUSTRATED, Emotion.ANGRY}
 
