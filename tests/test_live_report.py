@@ -91,6 +91,52 @@ def test_discarded_digits_are_not_echoed_on_later_turns_either():
     assert "4472" not in later.reply and "4472" not in json.dumps(later.trace)
 
 
+# --- Live demo: "No this is so frustrating!!" to the human offer --------------------------
+
+DEMO_RUN = [MARGARET_OPENING, "Yes, I want to know why it was denied", "No this is so frustrating!!"]
+
+
+def test_regression_no_with_frustration_declines_the_human_offer():
+    state, results, _ = run(
+        [
+            MARGARET_EXTRACTION,
+            {"confirms_case": "yes", "intent": "denial_question"},
+            # What the live model returned: frustration read as wanting a human.
+            {"emotion": "frustrated", "wants_human": True, "intent": "speak_to_human"},
+            {"emotion": "frustrated", "confirms_case": "no"},
+        ],
+        DEMO_RUN + ["no"],
+    )
+    reoffer, declined = results[2], results[3]
+    assert reoffer.trace["plan"]["action"] == "reoffer_human"
+    assert reoffer.trace["phase_after"] == "PROCESS_CASE" and not state.handoff_requested
+    assert declined.trace["plan"]["action"] == "human_offer_declined"
+    assert declined.reply.endswith("Is there anything else I can help you with?")
+    assert state.phase == Phase.PROCESS_CASE
+
+
+def test_frustration_without_mentioning_a_human_is_not_a_transfer_request():
+    state, _, _ = run(
+        [{"full_name": "Margaret Chen"}, {"emotion": "frustrated", "wants_human": True}],
+        ["Margaret Chen", "This is ridiculous, why is this so hard"],
+    )
+    assert state.phase == Phase.VERIFY_ID and state.escalation_reason is None
+
+
+def test_an_explicit_human_request_still_transfers_immediately():
+    state, _, _ = run([{"wants_human": True}], ["Hi i want to be connected to a human rep"])
+    assert state.phase == Phase.ESCALATED and state.escalation_reason == "caller_requested_human"
+
+
+def test_no_followed_by_an_explicit_transfer_request_is_honored():
+    state, results, _ = run(
+        [MARGARET_EXTRACTION, {"confirms_case": "yes"}, {"wants_human": True}],
+        [MARGARET_OPENING, "yes", "No, just transfer me to a person please"],
+    )
+    assert results[2].trace["plan"]["action"] == "offer_email"  # email first, then transfer
+    assert state.handoff_requested
+
+
 def test_reply_cannot_claim_verification_that_did_not_happen():
     state, results, _ = run(
         [{**MARGARET_EXTRACTION, "id_last4": "4472"}, {"emotion": "frustrated"}],

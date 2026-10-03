@@ -245,8 +245,24 @@ class SOPEngine:
             if (normalize_email(ex.email) or ex.email.lower()) not in on_file:
                 ex.unsupported_request = "updating your email address"
 
-        answer = _answer(ex)
         offer_open = state.pending_question == Pending.OFFER_HUMAN
+
+        # What the caller typed outranks what the model inferred (live demo: "No this is
+        # so frustrating!!" to "Would you like me to connect you…?" was read as wanting a
+        # human, and the caller was transferred after saying no).
+        # 1. Wanting a human needs a human in the message ("transfer me", "a person",
+        #    "a rep"); frustration alone is not a request to be transferred.
+        if not ex.human_word:
+            ex.wants_human = False
+            if ex.intent == Intent.SPEAK_TO_HUMAN:
+                ex.intent = None
+        # 2. Starting with "no" while we ask "Would you like me to connect you?" declines
+        #    it, unless the caller explicitly asks to be transferred in the same breath.
+        if offer_open and ex.no_phrase and not ex.human_ask:
+            ex.wants_human = False
+            ex.confirms_case = ex.email_consent = YesNo.NO
+
+        answer = _answer(ex)
 
         # While a human offer is open, a plain "no" declines the offer; only an explicit
         # "that's all" / "bye" means the caller is done. (Live test: the model read
