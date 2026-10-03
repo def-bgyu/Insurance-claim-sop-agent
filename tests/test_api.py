@@ -45,6 +45,24 @@ def test_full_conversation_over_http(client):
     assert len(client.get(f"/api/session/{sid}/trace").json()) == 4
 
 
+def test_consent_endpoint_and_action_required(monkeypatch):
+    from tests.test_engine import DAVID, DAVID_TEXT
+
+    monkeypatch.setattr(main, "AnthropicProvider", lambda **_: ScriptedProvider([DAVID]))
+    monkeypatch.setattr("backend.sop.engine.TraceWriter", lambda: TraceWriter(enabled=False))
+    client = TestClient(main.app)
+    sid = client.post("/api/session", json={"api_key": "test-key"}).json()["session_id"]
+
+    body = client.post(f"/api/session/{sid}/message", json={"text": DAVID_TEXT}).json()
+    assert body["action_required"]["type"] == "policyholder_consent"
+    assert body["state"]["consent"]["status"] == "pending"
+
+    approved = client.post(f"/api/session/{sid}/consent", json={"decision": "approved"}).json()
+    assert approved["state"]["verified"] and "action_required" not in approved
+    # A second decision is refused: consent is no longer pending.
+    assert client.post(f"/api/session/{sid}/consent", json={"decision": "denied"}).status_code == 409
+
+
 def test_unknown_session_is_404(client):
     assert client.post("/api/session/nope/message", json={"text": "hi"}).status_code == 404
 

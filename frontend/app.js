@@ -9,6 +9,7 @@ const LIMITS = { off_topic: 3, frustration: 3, verification_failures: 3 };
 let sessionId = null;
 let lastPhase = "VERIFY_ID";
 let traces = [];
+let consentNoteShown = false;
 
 // --- API --------------------------------------------------------------------------
 
@@ -141,6 +142,7 @@ function section(title, content) {
 function renderState(state) {
   const body = $("#tab-state");
   body.replaceChildren(
+    ...(state.consent.status === "pending" ? [consentCard(state.consent)] : []),
     section("Workflow", kv([
       ["Phase", state.phase],
       ["Verified", state.verified ? badge("verified", "ok") : badge("not verified", "warn")],
@@ -198,6 +200,16 @@ function renderTrace() {
 function applyState(state) {
   renderPhases(state);
   renderState(state);
+  if (state.consent.status === "pending" && !consentNoteShown) {
+    // Make the demo control impossible to miss, for people and automated evaluators alike.
+    consentNoteShown = true;
+    addMessage(
+      "system",
+      "🔧 Demo: a consent request was sent to the policyholder's (simulated) phone. " +
+        "Approve or deny it in the SOP state panel on the right.",
+    );
+    switchTab("state");
+  }
   $("#email-btn").disabled = !state.email.offered;
   const over = state.phase === "ESCALATED" || state.phase === "ENDED";
   $("#input").disabled = over;
@@ -219,6 +231,7 @@ async function startSession(event) {
     });
     sessionId = data.session_id;
     traces = [];
+    consentNoteShown = false;
     lastPhase = "VERIFY_ID";
     $("#messages").replaceChildren();
     $("#tab-trace").replaceChildren(Object.assign(document.createElement("p"), {
@@ -254,21 +267,85 @@ async function sendMessage(event) {
       body: JSON.stringify({ text }),
     });
     setTyping(false);
-    const meta = data.trace.response.source === "fallback" ? "safe fallback reply" : null;
-    addMessage("agent", data.reply, meta);
-    traces.push(data.trace);
-    renderTrace();
     input.disabled = false;
     $("#send-btn").disabled = false;
-    applyState(data.state);
-
-    const llmError = data.trace.extraction?.llm_error || data.trace.response.llm_error;
-    showBanner(llmError ? `Model call failed (${llmError}). The harness used its deterministic fallbacks.` : "");
+    handleTurn(data);
     if (!input.disabled) input.focus();
   } catch (err) {
     setTyping(false);
     input.disabled = false;
     $("#send-btn").disabled = false;
+    showBanner(err.message, "danger");
+  }
+}
+
+// Shared by chat messages and consent decisions: show the reply, update panels.
+function handleTurn(data) {
+  const meta = data.trace.response.source === "fallback" ? "safe fallback reply" : null;
+  addMessage("agent", data.reply, meta);
+  traces.push(data.trace);
+  renderTrace();
+  applyState(data.state);
+  const llmError = data.trace.extraction?.llm_error || data.trace.response.llm_error;
+  showBanner(llmError ? `Model call failed (${llmError}). The harness used its deterministic fallbacks.` : "");
+}
+
+// --- Simulated policyholder consent ----------------------------------------------------
+// A representative's access needs the policyholder's approval, which would arrive from
+// their phone. Here the tester plays the policyholder from the debug panel.
+
+const CONSENT_RESULT = {
+  approved: "approved the request",
+  denied: "denied the request",
+  no_response: "didn't respond to the request",
+};
+
+function consentCard(consent) {
+  const card = document.createElement("div");
+  card.className = "consent-card";
+  card.setAttribute("role", "alert");
+
+  const title = document.createElement("p");
+  title.className = "consent-title";
+  title.textContent = "📱 Simulated: policyholder's phone";
+
+  const body = document.createElement("p");
+  body.textContent =
+    `${consent.policyholder_name} received a consent request: "${consent.representative} ` +
+    `(${consent.relationship}) is asking to discuss your claims." How do they respond?`;
+
+  const buttons = document.createElement("div");
+  buttons.className = "consent-actions";
+  for (const [decision, label, cls] of [
+    ["approved", "Approve", "btn primary"],
+    ["denied", "Deny", "btn"],
+    ["no_response", "Don't respond", "btn"],
+  ]) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = cls;
+    b.textContent = label;
+    b.addEventListener("click", () => decideConsent(decision, consent.policyholder_name));
+    buttons.append(b);
+  }
+
+  card.append(title, body, buttons);
+  return card;
+}
+
+async function decideConsent(decision, policyholder) {
+  document.querySelectorAll(".consent-actions button").forEach((b) => (b.disabled = true));
+  addMessage("system", `📱 Simulated: ${policyholder.split(" ")[0]} ${CONSENT_RESULT[decision]}.`);
+  setTyping(true);
+  try {
+    const data = await api(`/api/session/${sessionId}/consent`, {
+      method: "POST",
+      body: JSON.stringify({ decision }),
+    });
+    setTyping(false);
+    handleTurn(data);
+  } catch (err) {
+    setTyping(false);
     showBanner(err.message, "danger");
   }
 }

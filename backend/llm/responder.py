@@ -87,7 +87,14 @@ def grounding_violations(reply: str, plan: ResponsePlan) -> list[str]:
 
 def _history(state: SessionState) -> list[Message]:
     turns = state.transcript[-HISTORY_TURNS:]
-    messages = [Message("user" if t.role == "user" else "assistant", t.text) for t in turns]
+    messages = []
+    for t in turns:
+        if t.role == "agent":
+            messages.append(Message("assistant", t.text))
+        elif t.role == "event":  # something outside the chat, e.g. a consent decision
+            messages.append(Message("user", f"[System note, not said by the caller: {t.text}]"))
+        else:
+            messages.append(Message("user", t.text))
     # The API expects the conversation to start with the caller.
     if messages and messages[0].role == "assistant":
         messages.insert(0, Message("user", "(call connected)"))
@@ -125,7 +132,9 @@ def _generate(
     provider: LLMProvider, state: SessionState, plan: ResponsePlan, directive: str
 ) -> tuple[str, LLMResult, list[str]]:
     """One model attempt: (cleaned body, raw result, violations)."""
-    system = prompts.responder_system(directive, plan.facts, plan.verified_name, plan.address_as)
+    system = prompts.responder_system(
+        directive, plan.facts, plan.verified_name, plan.address_as, plan.representative
+    )
     result = provider.complete(system, _history(state), max_tokens=500)
     if result.error or not result.text.strip():
         return "", result, ["llm_error"]

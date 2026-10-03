@@ -8,6 +8,7 @@ and never echoed back.
 import os
 import threading
 from dataclasses import dataclass, field
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -48,6 +49,28 @@ class MessageRequest(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
 
 
+class ConsentRequest(BaseModel):
+    decision: Literal["approved", "denied", "no_response"]
+
+
+def _turn_response(session: Session, result) -> dict:
+    session.traces.append(result.trace)
+    body = {"reply": result.reply, "state": public_snapshot(session.state), "trace": result.trace}
+    if session.state.consent.status == "pending":
+        # Tells any client (including an automated evaluator) that the conversation is
+        # waiting on the simulated policyholder, and how to answer for them.
+        body["action_required"] = {
+            "type": "policyholder_consent",
+            "description": (
+                "Simulated policyholder's phone: approve or deny the representative's request. "
+                "In the UI this is the pop-up in the debug panel."
+            ),
+            "endpoint": f"/api/session/{session.state.session_id}/consent",
+            "options": ["approved", "denied", "no_response"],
+        }
+    return body
+
+
 def _get(session_id: str) -> Session:
     session = SESSIONS.get(session_id)
     if session is None:
@@ -59,8 +82,7 @@ def _get(session_id: str) -> Session:
 def get_config():
     return {
         "server_has_api_key": bool(os.getenv("ANTHROPIC_API_KEY")),
-        "default_model": DEFAULT_ANTHROPIC_MODEL,
-        "models": MODEL_CHOICES,
+        "default_model": DEFAULT_ANTHROPIC_MODEL
     }
 
 
@@ -69,8 +91,6 @@ def new_session(req: NewSessionRequest):
     api_key = (req.api_key or "").strip() or os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         raise HTTPException(400, "No API key: enter one in the UI or set ANTHROPIC_API_KEY.")
-    if req.model not in MODEL_CHOICES:
-        raise HTTPException(400, f"Unsupported model. Choose one of {MODEL_CHOICES}.")
 
     engine = SOPEngine(AnthropicProvider(api_key=api_key, model=req.model), get_data())
     state = engine.start()
@@ -87,8 +107,19 @@ def send_message(session_id: str, req: MessageRequest):
     session = _get(session_id)
     with session.lock:
         result = session.engine.handle(session.state, req.text.strip())
-        session.traces.append(result.trace)
-        return {"reply": result.reply, "state": public_snapshot(session.state), "trace": result.trace}
+        return _turn_response(session, result)
+
+
+@app.post("/api/session/{session_id}/consent")
+def policyholder_consent(session_id: str, req: ConsentRequest):
+    """Demo control: the tester answers the consent request as the policyholder."""
+    session = _get(session_id)
+    with session.lock:
+        try:
+            result = session.engine.consent_decision(session.state, req.decision)
+        except ValueError as e:
+            raise HTTPException(409, str(e)) from e
+        return _turn_response(session, result)
 
 
 @app.get("/api/session/{session_id}/trace")

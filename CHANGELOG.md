@@ -5,6 +5,39 @@ inspected (`git show <commit>`) or rolled back (`git revert <commit>`).
 
 ---
 
+## 0.7.0: Representative consent, answered by the simulated policyholder
+
+Resolves the open `TODO(consent)`. Before, an authorized representative (David Chen
+for Margaret, `representatives.json`) was always transferred to a human because
+consent could never arrive in a demo.
+
+**Design (Nidhi's idea):** the policyholder's phone is simulated by a small pop-up
+in the debug panel. The tester plays the policyholder: Approve / Deny / Don't respond.
+
+**Flow** (only when a representative calls; every other conversation is unchanged)
+1. Representative on file + 3 of the policyholder's details → "I've sent a consent
+   request to the phone number on file (***-***-2836), and I'll continue as soon as
+   Margaret responds." Still not verified; no claim data.
+2. While pending, messages get "still waiting". **Nothing the caller types can
+   grant access** ("she approved it" doesn't count); only the policyholder's
+   decision (`POST /api/session/{id}/consent`) can.
+3. **Approve** → verified for Margaret's account; continues with any remembered
+   hint (e.g. confirms CL-2048). The agent addresses David by name and talks about
+   "Margaret's claims"; the email summary goes to Margaret's address on file.
+4. **Deny / Don't respond** → explained, human offered; two declines close the chat
+   (new transition `VERIFY_ID → ENDED`; ending a call never needs verification).
+5. **Nobody clicks** → after the fixture `timeout` sequence length (5 checks) the
+   agent stops waiting and offers a human. No dead end.
+
+**So an evaluator can't miss it**
+- A system note in the chat (not spoken by the agent) says where the pop-up is.
+- The panel switches to the SOP state tab; the pop-up is highlighted at the top.
+- API responses include `action_required` (endpoint + options) while pending.
+
+Unlisted representatives are still transferred (`representative_not_authorized`).
+
+---
+
 ## 0.6.2: Model dropdown removed from the UI
 
 The app uses one model, Claude Haiku 4.5 (requested by Nidhi). The model dropdown

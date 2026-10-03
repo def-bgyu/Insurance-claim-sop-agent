@@ -35,6 +35,23 @@ class EmailState(BaseModel):
     consent: bool | None = None  # None = not answered yet
 
 
+class ConsentState(BaseModel):
+    """Policyholder consent for an authorized representative (e.g. David for Margaret).
+
+    In production the request would go to the policyholder's phone. In this demo the
+    tester plays the policyholder from the debug panel; only that decision (never
+    anything the caller types) can grant access.
+    """
+
+    status: str | None = None  # pending | approved | denied | no_response
+    party_id: str | None = None  # the policyholder whose consent is requested
+    policyholder_name: str | None = None
+    representative: str | None = None
+    relationship: str | None = None
+    phone_masked: str | None = None
+    checks: int = 0  # caller messages while waiting; gives up after the timeout length
+
+
 class Counters(BaseModel):
     off_topic: int = 0
     frustration: int = 0
@@ -51,7 +68,7 @@ class DiscussedItem(BaseModel):
 
 
 class Turn(BaseModel):
-    role: str  # "user" | "agent"
+    role: str  # "user" | "agent" | "event" (something that happened outside the chat)
     text: str
     phase: Phase
     at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -95,6 +112,7 @@ class SessionState(BaseModel):
     repeat_count: int = 0
 
     counters: Counters = Field(default_factory=Counters)
+    consent: ConsentState = Field(default_factory=ConsentState)
     email: EmailState = Field(default_factory=EmailState)
     escalation_reason: str | None = None
 
@@ -114,8 +132,9 @@ class SessionState(BaseModel):
             return
         if to not in ALLOWED_TRANSITIONS[self.phase]:
             raise ValueError(f"Illegal SOP transition {self.phase} -> {to}")
-        # Hard gate: nothing past VERIFY_ID without a verified identity.
-        if to != Phase.ESCALATED and not self.verified:
+        # Hard gate: nothing past VERIFY_ID without a verified identity. (Transferring or
+        # ending the call is always allowed.)
+        if to not in (Phase.ESCALATED, Phase.ENDED) and not self.verified:
             raise ValueError(f"Cannot enter {to} before identity is verified")
         self.phase = to
 

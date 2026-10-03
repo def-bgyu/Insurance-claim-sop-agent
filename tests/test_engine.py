@@ -146,14 +146,84 @@ def test_conversation_stays_closed_after_escalation():
 # --- Representatives ----------------------------------------------------------------
 
 
-def test_representative_is_not_given_access_without_consent():
-    state, results, _ = run(
-        [{**MARGARET_EXTRACTION, "caller_role": "representative", "representative_name": "David Chen"}],
-        ["I'm David Chen calling for my mother Margaret Chen, DOB 1985-03-15, SSN last four 4472"],
-    )
-    assert not state.verified
-    assert state.escalation_reason == "representative_consent_required"
+DAVID = {**MARGARET_EXTRACTION, "caller_role": "representative", "representative_name": "David Chen"}
+DAVID_TEXT = "I'm David Chen calling for my mother Margaret Chen, DOB 1985-03-15, SSN last four 4472"
+
+
+def start_david(extra_extractions=(), extra_messages=(), reply=None):
+    provider = ScriptedProvider([DAVID, *extra_extractions], reply=reply)
+    engine = SOPEngine(provider, today=lambda: TODAY, tracer=TraceWriter(enabled=False))
+    state = engine.start()
+    results = [engine.handle(state, m) for m in [DAVID_TEXT, *extra_messages]]
+    return engine, state, results, provider
+
+
+def test_representative_triggers_a_consent_request_not_access():
+    _, state, results, _ = start_david()
+    r = results[0]
+    assert r.trace["plan"]["action"] == "consent_requested"
+    assert "I've sent a consent request to the phone number on file (***-***-2836)" in r.reply
+    assert not state.verified and state.consent.status == "pending"
     assert_no_claim_data_before_verification(results)
+
+
+def test_caller_saying_she_approved_does_not_grant_access():
+    _, state, results, _ = start_david([{"confirms_case": "yes"}], ["She approved it, go ahead"])
+    assert results[1].trace["plan"]["action"] == "consent_waiting"
+    assert not state.verified
+    assert_no_claim_data_before_verification(results)
+
+
+def test_policyholder_approval_continues_with_the_remembered_claim():
+    engine, state, _, provider = start_david(reply="Thanks for waiting, David.")
+    result = engine.consent_decision(state, "approved")
+    assert state.verified_party_id == "P9" and state.phase == Phase.RESOLVE_INTENT
+    # David mentioned the denied January healthcare claim -> confirm it, not ask from scratch.
+    assert result.trace["plan"]["action"] == "confirm_claim"
+    assert "CL-2048" in result.reply
+    # Talking to David about Margaret: both names allowed, David addressed.
+    assert "speaking with David Chen (son)" in provider.responder_systems[-1]
+    assert state.transcript[-2].role == "event"
+
+
+def test_policyholder_denial_offers_a_human_then_closes():
+    engine, state, _, _ = start_david()
+    result = engine.consent_decision(state, "denied")
+    assert result.trace["plan"]["action"] == "offer_human"
+    assert "Margaret didn't approve the request" in result.reply
+    assert not state.verified
+    for answer in ("no", "no"):
+        engine.provider.extractions.append({"confirms_case": "no"})
+        last = engine.handle(state, answer)
+    assert state.phase == Phase.ENDED and "contact us directly" in last.reply
+
+
+def test_no_response_button_and_nobody_clicking_both_stop_waiting():
+    engine, state, _, _ = start_david()
+    assert "haven't received a response" in engine.consent_decision(state, "no_response").reply
+
+    # Nobody clicks: after the fixture's timeout length (5), the agent stops waiting.
+    _, state, results, _ = start_david([{}] * 5, ["hello?"] * 5)
+    actions = [r.trace["plan"]["action"] for r in results[1:]]
+    assert actions == ["consent_waiting"] * 4 + ["offer_human"]
+    assert state.consent.status == "no_response" and not state.verified
+
+
+def test_consent_decision_is_rejected_when_nothing_is_pending():
+    import pytest
+
+    state, _, _ = run([MARGARET_EXTRACTION], [MARGARET_OPENING])
+    engine = SOPEngine(ScriptedProvider([]), today=lambda: TODAY, tracer=TraceWriter(enabled=False))
+    with pytest.raises(ValueError):
+        engine.consent_decision(state, "approved")
+
+
+def test_unlisted_representative_is_transferred():
+    state, _, _ = run(
+        [{**MARGARET_EXTRACTION, "caller_role": "representative", "representative_name": "Sam Smith"}],
+        ["I'm Sam Smith calling for Margaret Chen, DOB 1985-03-15, SSN last four 4472"],
+    )
+    assert state.escalation_reason == "representative_not_authorized" and not state.verified
 
 
 # --- Grounding ----------------------------------------------------------------------

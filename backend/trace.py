@@ -67,6 +67,7 @@ def public_snapshot(state: SessionState) -> dict:
         "counters": state.counters.model_dump(),
         "email": state.email.model_dump(),
         "handoff_requested": state.handoff_requested,
+        "consent": state.consent.model_dump(exclude={"party_id"}),
         "escalation_reason": state.escalation_reason,
     }
 

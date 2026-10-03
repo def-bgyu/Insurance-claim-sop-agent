@@ -93,10 +93,18 @@ FACTS you may use:
 
 
 def responder_system(
-    directive: str, facts: list[str], verified_name: str | None = None, address_as: str | None = None
+    directive: str, facts: list[str], verified_name: str | None = None,
+    address_as: str | None = None, representative: str | None = None,
 ) -> str:
     facts_text = "\n".join(f"- {f}" for f in facts) if facts else "- (none: do not state any claim details)"
-    if verified_name:
+    if verified_name and representative:
+        customer_first = verified_name.split()[0]
+        name_rule = (
+            f"You are speaking with {representative}, calling on behalf of the policyholder "
+            f"{verified_name}. Address the caller as {address_as}. When talking about the account "
+            f"or claims, refer to them as {customer_first}'s (not 'your'). Never use any other name."
+        )
+    elif verified_name:
         name_rule = (
             f"The verified customer is {verified_name}. If you address them by name, call them "
             f"{address_as}. Never use any other name, even if another name appears in the conversation."

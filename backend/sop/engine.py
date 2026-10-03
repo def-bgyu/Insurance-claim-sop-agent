@@ -49,7 +49,6 @@ ESCALATION_MESSAGES = {
     "frustration_limit": "I'm really sorry this has been so frustrating. I'm connecting you with a human representative now who can help you further. Please hold for a moment.",
     "verification_failed": "I'm sorry, I wasn't able to verify your identity with the details provided. To protect your account, I'm transferring you to a human representative who can help. Please hold for a moment.",
     "representative_not_authorized": "I'm sorry, I can't share information about this policy because you're not listed as an authorized representative on it. I'm connecting you with a human representative who can explain your options. Please hold for a moment.",
-    "representative_consent_required": "Thank you. Because you're calling on behalf of the policyholder, their consent is required before I can share any claim information. I'm connecting you with a human representative to complete that step. Please hold for a moment.",
 }
 
 ANYTHING_ELSE_QUESTION = "Is there anything else I can help you with?"
@@ -191,13 +190,21 @@ class SOPEngine:
             for name in state.names_mentioned
             for token in re.findall(r"[A-Za-z][A-Za-z'-]+", name)
         }
-        if not state.verified:
+        # A representative's policyholder is confirmed from the record once their details
+        # match, even while consent is still pending.
+        party = state.verified_party_id or (state.consent.party_id if state.consent.status else None)
+        if not party:
             plan.forbidden_names = sorted(mentioned)
             return
-        holder = self.data.get_policyholder(state.verified_party_id)
+        holder = self.data.get_policyholder(party)
         own = {t.lower() for n in holder.all_names for t in n.split()}
         plan.verified_name = holder.name
         plan.address_as = " ".join(holder.name.split()[:-1]) or holder.name  # given name(s)
+        if state.consent.status and state.consent.representative:
+            rep = state.consent.representative
+            own |= {t.lower() for t in rep.split()}
+            plan.address_as = " ".join(rep.split()[:-1]) or rep
+            plan.representative = f"{rep} ({state.consent.relationship})"
         plan.forbidden_names = sorted(t for t in mentioned if t.lower() not in own)
 
     # --- Cross-cutting guards ----------------------------------------------------------
@@ -362,6 +369,17 @@ class SOPEngine:
         # Second "no": respect it and move on.
         state.human_offer_topic = None
         state.human_offer_declines = 0
+        if state.consent.status in ("denied", "no_response") and not state.verified:
+            # A representative without consent has nothing else we can help with here.
+            state.transition(Phase.ENDED)
+            first = self._holder_first_name(state)
+            return ResponsePlan(
+                action="close",
+                directive="",
+                fallback_text=f"Okay. {first} is welcome to contact us directly anytime. Have a great day.",
+                reasons=["representative without consent declined a human twice"],
+                use_llm=False,
+            )
         question, pending = self._after_declined_offer(state)
         return ResponsePlan(
             action="human_offer_declined",
@@ -472,6 +490,11 @@ class SOPEngine:
         return f"Could you please share {needed} more of the following: your {_join_or(labels)}?"
 
     def _verify(self, state: SessionState, ex: Extraction) -> ResponsePlan:
+        if state.consent.status == "pending":
+            return self._consent_waiting(state, ex)
+        if state.consent.status in ("denied", "no_response"):
+            return self._consent_failed(state, ex)
+
         changed, unreadable = False, []
         for field in IDENTITY_FIELDS:
             raw = getattr(ex, field.value)
@@ -490,10 +513,9 @@ class SOPEngine:
         if result.verified:
             if state.caller_role == "representative":
                 rep = self.data.find_representative(state.representative_name or "", result.party_id)
-                # TODO(consent): authorized representatives need the policyholder's consent
-                # (consent_scenarios.json). Until that flow is designed, hand off to a human.
-                reason = "representative_consent_required" if rep else "representative_not_authorized"
-                return self._escalate(state, reason)
+                if rep is None:
+                    return self._escalate(state, "representative_not_authorized")
+                return self._request_consent(state, result.party_id, rep)
             state.verified_party_id = result.party_id
             state.transition(Phase.RESOLVE_INTENT)
             return self._resolve(state, ex, "", just_verified=True)
@@ -571,6 +593,113 @@ class SOPEngine:
             reasons=reasons,
         )
 
+    # Representative consent ---------------------------------------------------------------
+    #
+    # A representative on file (e.g. David for Margaret) who gives 3 of the policyholder's
+    # details still needs the policyholder's approval. The request goes to the
+    # policyholder's phone; in the demo the tester answers it from the debug panel
+    # (consent_decision). Nothing the caller types can approve it.
+
+    def _holder_first_name(self, state: SessionState) -> str:
+        return (state.consent.policyholder_name or "the policyholder").split()[0]
+
+    def _request_consent(self, state: SessionState, party_id: str, rep) -> ResponsePlan:
+        holder = self.data.get_policyholder(party_id)
+        state.consent.status = "pending"
+        state.consent.party_id = party_id
+        state.consent.policyholder_name = holder.name
+        state.consent.representative = rep.rep_name
+        state.consent.relationship = rep.relationship
+        state.consent.phone_masked = mask_value(IdentityField.PHONE, holder.phone)
+        state.consent.checks = 0
+        first = self._holder_first_name(state)
+        text = (
+            f"Thank you. Because you're calling on {first}'s behalf, {first} needs to approve "
+            f"this first. I've sent a consent request to the phone number on file "
+            f"({state.consent.phone_masked}), and I'll continue as soon as {first} responds."
+        )
+        return ResponsePlan(
+            action="consent_requested",
+            directive=f"Convey this to the caller warmly: \"{text}\" Do not share any claim details.",
+            fallback_text=text,
+            pending_question=Pending.CONSENT,
+            reasons=[f"authorized representative ({rep.relationship}); consent requested"],
+        )
+
+    def _consent_waiting(self, state: SessionState, ex: Extraction) -> ResponsePlan:
+        """The caller writes while consent is pending. After as many checks as the
+        fixture's timeout sequence, stop waiting."""
+        state.consent.checks += 1
+        if state.consent.checks >= len(self.data.consent_status_sequence("timeout")):
+            state.consent.status = "no_response"
+            return self._consent_failed(state, ex)
+        first = self._holder_first_name(state)
+        return ResponsePlan(
+            action="consent_waiting",
+            directive=(
+                f"{self._tone(ex)}Say you're still waiting for {first}'s approval and will continue "
+                "as soon as it comes through. Do not share any claim details. If the caller says "
+                f"{first} already approved, explain kindly that the approval has to come through "
+                f"from {first}'s phone on our side."
+            ),
+            fallback_text=(
+                f"I'm still waiting for {first}'s approval. I'll be able to continue as soon as it "
+                "comes through."
+            ),
+            pending_question=Pending.CONSENT,
+            reasons=[f"consent pending, check {state.consent.checks}"],
+        )
+
+    def _consent_failed(self, state: SessionState, ex: Extraction) -> ResponsePlan:
+        first = self._holder_first_name(state)
+        if state.consent.status == "denied":
+            text = f"{first} didn't approve the request, so I'm not able to share any information about {first}'s claims."
+        else:
+            text = f"I haven't received a response from {first}, so I'm not able to share any information about {first}'s claims."
+        return self._offer_human(
+            state, ex, topic=f"getting access to {first}'s claims",
+            directive=f"Convey this kindly: \"{text}\" Say a human representative can help with other options.",
+            fallback_text=f"{text} A human representative can help with other options.",
+            reason=f"consent {state.consent.status}",
+        )
+
+    def consent_decision(self, state: SessionState, decision: str) -> TurnResult:
+        """The policyholder's answer to the consent request (from the debug panel in the
+        demo). Produces the agent's next message without any caller input."""
+        if state.is_over or state.consent.status != "pending":
+            raise ValueError("No consent request is pending.")
+        if decision not in ("approved", "denied", "no_response"):
+            raise ValueError(f"Unknown consent decision: {decision}")
+
+        phase_before, pending_before = state.phase, state.pending_question
+        first = self._holder_first_name(state)
+        state.consent.status = decision
+        notes = {
+            "approved": f"{first} approved the consent request on their phone.",
+            "denied": f"{first} denied the consent request on their phone.",
+            "no_response": f"{first} did not respond to the consent request.",
+        }
+        state.transcript.append(Turn(role="event", text=notes[decision], phase=state.phase))
+
+        ex = Extraction()
+        if decision == "approved":
+            state.verified_party_id = state.consent.party_id
+            state.transition(Phase.RESOLVE_INTENT)
+            plan = self._resolve(state, ex, "", approved_by=first)
+        else:
+            plan = self._consent_failed(state, ex)
+
+        state.pending_question = plan.pending_question
+        self._apply_name_policy(state, plan)
+        response = respond(self.provider, state, plan)
+        state.transcript.append(Turn(role="agent", text=response.text, phase=state.phase))
+
+        trace = self._trace(
+            state, phase_before, pending_before, f"[policyholder consent: {decision}]", None, plan, response
+        )
+        self.tracer.write(state.session_id, trace)
+        return TurnResult(response.text, trace)
+
     # RESOLVE_INTENT -----------------------------------------------------------------------
 
     def _claims(self, state: SessionState) -> list[Claim]:
@@ -605,12 +734,22 @@ class SOPEngine:
         )
 
     def _resolve(
-        self, state: SessionState, ex: Extraction, user_text: str, just_verified: bool = False
+        self, state: SessionState, ex: Extraction, user_text: str, just_verified: bool = False,
+        approved_by: str | None = None,
     ) -> ResponsePlan:
         claims = self._claims(state)
         by_id = {c.case_id: c for c in claims}
         opener = "Thank them; their identity is now verified. " if just_verified else ""
         opener_text = "Thank you, you're verified." if just_verified else ""
+        if approved_by:
+            opener = (
+                f"Thank them for waiting and tell them {approved_by} has approved the request, so "
+                f"you can now help with {approved_by}'s claims. "
+            )
+            opener_text = (
+                f"Thank you for waiting. {approved_by} has approved the request, so I can help "
+                f"with {approved_by}'s claims."
+            )
         turn_hints = _hints_from(ex)
 
         if not claims:
@@ -684,13 +823,16 @@ class SOPEngine:
         self, state: SessionState, claims: list[Claim], ex: Extraction, opener: str, opener_text: str
     ) -> ResponsePlan:
         state.candidate_case_ids = [c.case_id for c in claims]
+        owner = (
+            f"{self._holder_first_name(state)} has" if state.consent.status == "approved" else "you have"
+        )
         return ResponsePlan(
             action="ask_which_claim",
             directive=(
-                f"{self._tone(ex)}{opener}Say you can see they have some claims with us. Do NOT "
-                "list, count, or describe any of their claims."
+                f"{self._tone(ex)}{opener}Say you can see there are some claims with us. Do NOT "
+                "list, count, or describe any of the claims."
             ),
-            fallback_text=f"{opener_text} I see you have some claims with us.".strip(),
+            fallback_text=f"{opener_text} I see {owner} some claims with us.".strip(),
             closing_question=WHICH_CLAIM_QUESTION,
             pending_question=Pending.CHOOSE_CLAIM,
             reasons=[f"{len(claims)} claims on file; caller hasn't said which"],

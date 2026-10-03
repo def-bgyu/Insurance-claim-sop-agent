@@ -1,9 +1,4 @@
-"""Data access layer. The ONLY module that reads the fixture files.
-
-Everything else (verification, policy, LLM context) goes through these functions,
-and claim lookups are always scoped to a verified party_id, so no code path can
-hand one customer's data to another.
-"""
+#reads data from fixture and works as a data endpoint.
 
 import json
 from datetime import date
