@@ -117,7 +117,7 @@ def test_frustrated_caller_gets_empathy_not_claim_details():
     )
     plan = results[1].trace["plan"]
     assert plan["action"] == "ask_identity"
-    assert "protected" in plan["directive"] and "acknowledging" in plan["directive"]
+    assert "protected" in plan["directive"] and "acknowledge the situation" in plan["directive"]
     assert state.counters.frustration == 1 and state.phase == Phase.VERIFY_ID
     assert_no_claim_data_before_verification(results)
 
@@ -600,6 +600,60 @@ def test_final_messages_are_never_paraphrased():
     )
     assert results[-1].trace["response"]["source"] == "fallback"
     assert results[-1].reply.endswith("Please hold for a moment.")
+
+
+# --- Emotions: each handled differently; no empathy when none was expressed ---------
+
+
+def test_regression_no_unprompted_frustration_on_a_neutral_message():
+    # Live test: "The healthcare one!!!" (neutral) got "I hear your frustration".
+    state, results, _ = run(
+        [VERIFIED, {"case_type": "healthcare"}],
+        ["Margaret Chen, 1985-03-15, ssn 4472", "The healthcare one!!!"],
+        reply=[
+            "Thanks, you're verified.",
+            "I hear your frustration. I see more than one healthcare claim.",  # not allowed
+            "I see more than one healthcare claim on your account.",  # retry OK
+        ],
+    )
+    r = results[1]
+    assert r.trace["response"]["retried"] and r.trace["response"]["source"] == "llm"
+    assert "frustration" not in r.reply
+
+
+def test_empathy_is_allowed_when_the_emotion_was_detected():
+    _, results, _ = run(
+        [{"full_name": "Margaret Chen"}, {"emotion": "frustrated"}],
+        ["Margaret Chen", "This is ridiculous, I already told you who I am"],
+        reply=["Thanks.", "I know this has taken a few steps, and I'm sorry it's been frustrating."],
+    )
+    assert results[1].trace["response"]["source"] == "llm"
+    assert not results[1].trace["response"]["retried"]
+
+
+def _directive_for(emotion: str) -> str:
+    _, results, _ = run([{"full_name": "Margaret Chen", "emotion": emotion}], ["Margaret Chen"])
+    return results[0].trace["plan"]["directive"]
+
+
+def test_each_emotion_gets_its_own_guidance():
+    assert "apology" in _directive_for("angry")
+    assert "Reassure" in _directive_for("anxious")
+    assert "plain words" in _directive_for("confused")
+    assert "acknowledge the situation" in _directive_for("frustrated")
+    assert "sounds" not in _directive_for("neutral")
+
+
+def test_anxious_callers_hear_why_verification_matters():
+    assert "protected" in _directive_for("anxious")
+
+
+def test_anxiety_and_confusion_never_count_toward_a_transfer():
+    state, _, _ = run(
+        [{"emotion": "anxious"}, {"emotion": "confused"}, {"emotion": "anxious"}],
+        ["is my data safe?", "what do you mean?", "I'm worried"],
+    )
+    assert state.counters.frustration == 0 and state.phase != Phase.ESCALATED
 
 
 def test_email_preview_contains_discussion_outcome_and_next_steps():

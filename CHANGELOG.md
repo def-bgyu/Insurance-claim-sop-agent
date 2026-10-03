@@ -5,6 +5,41 @@ inspected (`git show <commit>`) or rolled back (`git revert <commit>`).
 
 ---
 
+## 0.8.0: Emotions handled individually; no unprompted "I understand your frustration"
+
+**Found in live testing.** Calm messages often got "I hear your frustration".
+Traces showed three causes: (1) the responder prompt invited the model to guess
+feelings, so it added empathy even when the extractor said *neutral*; (2) the
+extractor labeled questions, disagreement and pushback as frustrated, even "I'm
+not frustrated, why do you keep asking me which one"; (3) all five emotions got the
+same generic "acknowledge how they feel" instruction.
+
+**Changes**
+1. **Extractor calibration:** emotion defaults to neutral. Each emotion has a
+   definition and examples; a plain question, disagreement, correction, short
+   answer, typo or "!!!" alone is neutral; "I'm not frustrated" is neutral.
+2. **Responder never guesses feelings:** it may acknowledge them only when the
+   extractor detected an emotion this turn (`ResponsePlan.acknowledge_emotion`). When
+   it does, it acknowledges the situation instead of labeling the person, and never
+   reuses an empathy line.
+3. **Emotion guard** (`responder.emotion_violations`): a reply that talks about
+   frustration/feelings when no emotion was detected is regenerated once (same
+   mechanism as the name guard, now shared via `_retry_note`), then falls back.
+4. **One approach per emotion** (the brief's five):
+   - frustrated → acknowledge the situation briefly, keep moving;
+   - angry → brief sincere apology, no blame, calm and short;
+   - anxious → reassure (information protected, we'll work through it); now also
+     hears why verification matters;
+   - confused → plain words, one thing at a time, no repeated wording;
+   - refusal → unchanged: the other identity fields are offered as alternatives.
+   Frustration, anger and refusal still count toward the 3-strike transfer;
+   anxiety and confusion never do.
+
+Considered and dropped (Nidhi): a dedicated crisis/self-harm response. In live
+testing the model already responded appropriately (helplines, ended the call).
+
+---
+
 ## 0.7.1: No agent or company name; softer greeting; small-model comparison dropped
 
 - **No agent name or demo company** (Nidhi): the greeting introduces a "virtual

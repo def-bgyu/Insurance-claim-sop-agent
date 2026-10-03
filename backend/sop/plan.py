@@ -39,4 +39,8 @@ class ResponsePlan:
     verified_name: str | None = None  # full name on record
     address_as: str | None = None  # e.g. "Margaret" (or "David" for her representative)
     representative: str | None = None  # e.g. "David Chen (son)" when a rep is calling
+
+    # True only when the extractor detected an emotion this turn. Otherwise the reply
+    # may not comment on the caller's feelings (set by the engine on every turn).
+    acknowledge_emotion: bool = False
     forbidden_names: list[str] = field(default_factory=list)  # names the reply must not use

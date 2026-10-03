@@ -128,6 +128,47 @@ def name_violations(reply: str, plan: ResponsePlan) -> list[str]:
     ]
 
 
+# Commenting on the caller's feelings. Only allowed when the extractor detected an
+# emotion this turn; live testing showed the model adding "I understand your
+# frustration" to calm, neutral messages.
+_EMOTION_TALK = re.compile(
+    r"\b(?:frustrat\w*|upset\w*|i hear you|how you(?:'re| are)? feel\w*|your feelings|"
+    r"sorry you(?:'re| are) feeling|you(?:'re| are| sound| seem)\s+(?:angry|anxious|worried|stressed))\b",
+    re.IGNORECASE,
+)
+
+
+def emotion_violations(reply: str, plan: ResponsePlan) -> list[str]:
+    if not plan.acknowledge_emotion and _EMOTION_TALK.search(reply):
+        return ["unprompted emotion talk"]
+    return []
+
+
+# Mistakes worth one regeneration: the rest of the reply is usually fine, and the
+# fallback would lose the natural tone. Everything else goes straight to the fallback.
+def _retry_note(violations: list[str], plan: ResponsePlan) -> str | None:
+    notes = []
+    names = [v.removeprefix("wrong name ") for v in violations if v.startswith("wrong name")]
+    if names:
+        fix = (
+            f"address the caller as {plan.address_as} or without a name"
+            if plan.address_as else "do not address the caller by any name"
+        )
+        notes.append(
+            f"Your previous draft used a name that is not the verified customer's "
+            f"({', '.join(names)}); {fix}."
+        )
+    if "unprompted emotion talk" in violations:
+        notes.append(
+            "Your previous draft commented on the caller's feelings; the caller has not "
+            "expressed any, so do not mention feelings or frustration."
+        )
+    retryable = len(names) + ("unprompted emotion talk" in violations)
+    if not notes or retryable != len(violations):
+        return None
+    return "IMPORTANT: " + " ".join(notes) + " Write the reply again."
+
+
 def _generate(
     provider: LLMProvider, state: SessionState, plan: ResponsePlan, directive: str
 ) -> tuple[str, LLMResult, list[str]]:
@@ -144,7 +185,8 @@ def _generate(
     if not body:
         return "", result, ["empty"]
     violations = (
-        grounding_violations(body, plan) + action_violations(body, plan) + name_violations(body, plan)
+        grounding_violations(body, plan) + action_violations(body, plan)
+        + name_violations(body, plan) + emotion_violations(body, plan)
     )
     return body, result, violations
 
@@ -162,23 +204,12 @@ def respond(provider: LLMProvider, state: SessionState, plan: ResponsePlan) -> R
         )
     body, result, violations = _generate(provider, state, plan, directive)
 
-    # A wrong name is the one mistake worth a second try: the rest of the reply is
-    # usually fine, and the fallback would lose its natural tone.
-    wrong_names = [v for v in violations if v.startswith("wrong name")]
-    if wrong_names and len(wrong_names) == len(violations):
-        fix = (
-            f"address the caller as {plan.address_as} or without a name"
-            if plan.address_as else "do not address the caller by any name"
-        )
-        retry_directive = (
-            f"{directive}\nIMPORTANT: your previous draft used a name that is not the verified "
-            f"customer's ({', '.join(v.removeprefix('wrong name ') for v in wrong_names)}). "
-            f"Write the reply again and {fix}."
-        )
-        body, result, violations = _generate(provider, state, plan, retry_directive)
+    if note := _retry_note(violations, plan):
+        first = violations
+        body, result, violations = _generate(provider, state, plan, f"{directive}\n{note}")
         if violations:
-            return ResponseOutcome(fallback, "fallback", wrong_names + violations, result, retried=True)
-        return ResponseOutcome(_finish(body, plan), "llm", wrong_names, result, retried=True)
+            return ResponseOutcome(fallback, "fallback", first + violations, result, retried=True)
+        return ResponseOutcome(_finish(body, plan), "llm", first, result, retried=True)
 
     if violations:
         return ResponseOutcome(fallback, "fallback", violations, result)

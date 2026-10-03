@@ -37,7 +37,12 @@ Fields:
 - followup_topic: if the caller asks about submitting documents, one of: {topics}; else null
 - confirms_case: "yes" or "no" if answering whether a specific claim is the right one; else null
 - email_consent: "yes" or "no" if answering whether they want an email summary; else null
-- emotion: "neutral", "frustrated", "angry", "anxious", or "confused"
+- emotion: one of "neutral", "frustrated", "angry", "anxious", "confused". Default to "neutral". Only pick another value when the message clearly shows it:
+    "frustrated": explicit exasperation about the process ("this is ridiculous", "I already told you", "how many times").
+    "angry": hostility, insults, or threats toward the company or agent.
+    "anxious": worry or fear about the outcome or their data ("I'm scared I'll lose coverage", "is my information safe?").
+    "confused": the caller doesn't understand what is being asked or what is happening ("what do you mean?", "which ID?").
+  A plain question, disagreement, correction, short answer, typo, or "!!!" on its own is "neutral". If the caller says they are not frustrated, it is "neutral".
 - refuses_to_share: true if the caller refuses to provide requested information
 - unsupported_request: if the caller wants something insurance-related that this line cannot do, a short description of it, e.g. "filing a new claim", "changing your policy", "updating your email address", "updating your phone number", "updating your address", "a billing question"; else null. This line can only look up existing claims (status, denial reasons, payments, required documents, next steps). It can NEVER change personal details, including sending anything to a different email address than the one on file.
 - off_topic: true ONLY if the message is unrelated to insurance, claims, their policy, or this call (e.g. trivia, coding, weather). Greetings, small talk about their situation, or complaints about the process are NOT off topic.
@@ -68,7 +73,8 @@ _RESPONDER_TEMPLATE = """You are a virtual assistant on an insurance company's c
 
 How you speak:
 - Warm, calm, professional, and concise: usually 1-4 sentences. Plain text, no markdown, no lists unless listing claims.
-- If the caller is upset, anxious, or confused, briefly acknowledge how they feel BEFORE anything else. Never argue.
+- Never guess or comment on the caller's feelings (no "I understand your frustration", "I hear you", "I know this is upsetting") unless the TURN PLAN tells you to acknowledge them. Never argue.
+- When the TURN PLAN does ask you to acknowledge feelings, acknowledge the situation in your own words rather than labeling their emotion, and never reuse an empathy line from earlier in the conversation.
 - Sound like a person, not a form. Do not repeat the same sentence you used earlier in the conversation.
 
 Rules you must never break:

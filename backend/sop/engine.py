@@ -142,6 +142,7 @@ class SOPEngine:
             self._remember(state, ex)
             plan = self._guards(state, ex) or self._phase_plan(state, ex, user_text)
             plan = self._stuck_check(state, ex, plan)
+            plan.acknowledge_emotion = ex.emotion != Emotion.NEUTRAL
 
         # Hard invariant: claim facts can never reach the responder before verification.
         if plan.facts and not state.verified:
@@ -466,13 +467,31 @@ class SOPEngine:
             return self._process(state, ex, user_text)
         return self._post_process(state, ex)
 
+    # How a support agent responds to each emotion, before continuing with the workflow.
+    # (Refusal is handled where it matters: VERIFY_ID offers the other identity fields.)
+    _TONE = {
+        Emotion.FRUSTRATED: (
+            "The caller sounds frustrated. In one short sentence, acknowledge the situation (for "
+            "example, that this has taken a few steps) without labeling their feelings or using "
+            "stock phrases like 'I understand your frustration'. Then keep things moving. "
+        ),
+        Emotion.ANGRY: (
+            "The caller sounds angry. Open with a brief, sincere apology for their experience, "
+            "without blaming anyone and without naming their emotion. Stay calm and keep the "
+            "reply short. "
+        ),
+        Emotion.ANXIOUS: (
+            "The caller sounds worried. Reassure them briefly: their information is protected and "
+            "you'll work through this with them. Then continue. "
+        ),
+        Emotion.CONFUSED: (
+            "The caller sounds confused. Explain what you need or what is happening in simple, "
+            "plain words, one thing at a time, and do not repeat your earlier wording. "
+        ),
+    }
+
     def _tone(self, ex: Extraction) -> str:
-        if ex.emotion == Emotion.NEUTRAL:
-            return ""
-        return (
-            f"The caller seems {ex.emotion.value}. Start by briefly and sincerely acknowledging "
-            "that, then continue. "
-        )
+        return self._TONE.get(ex.emotion, "")
 
     # VERIFY_ID ----------------------------------------------------------------------------
 
@@ -522,7 +541,10 @@ class SOPEngine:
 
         tone = self._tone(ex)
         explain_why = ""
-        if ex.emotion in _UPSET or ex.refuses_to_share or (ex.intent and not changed):
+        if (
+            ex.emotion in _UPSET or ex.emotion == Emotion.ANXIOUS or ex.refuses_to_share
+            or (ex.intent and not changed)
+        ):
             explain_why = (
                 "Explain briefly that claim details are protected and can only be shared after "
                 "identity verification, to keep their information safe. Do not share any claim "
