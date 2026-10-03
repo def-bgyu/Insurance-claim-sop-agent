@@ -5,6 +5,19 @@ inspected (`git show <commit>`) or rolled back (`git revert <commit>`).
 
 ---
 
+## 0.9.0: Docker image
+
+- **Dockerfile** (`python:3.12-slim`, runs as a non-root user, honors the `PORT`
+  variable that hosting platforms set; defaults to 8000). `.dockerignore` keeps the
+  virtualenv, traces, tests and local config out of the image.
+- **Requirements split:** `requirements.txt` is runtime only (what the image
+  installs); `requirements-dev.txt` adds pytest and httpx for the test suite.
+- Smoke-tested in the container: UI and API respond, and with an invalid API key
+  the harness degrades gracefully (code-based verification still works, the
+  fallback reply is sent, no crash).
+
+---
+
 ## 0.8.0: Emotions handled individually; no unprompted "I understand your frustration"
 
 **Found in live testing.** Calm messages often got "I hear your frustration".
