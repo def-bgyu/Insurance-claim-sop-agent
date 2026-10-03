@@ -102,13 +102,33 @@ OFF_TOPIC_NOTE = "I can only help with insurance claim questions, so I can't hel
 
 
 def _has_on_topic_part(ex: Extraction) -> bool:
+    """The message carries real information (also: the conversation is progressing)."""
     return bool(ex.useful_fields() - _STYLE_SIGNALS)
+
+
+def _asks_something(ex: Extraction) -> bool:
+    """The caller asked a claim question (an intent or a document topic)."""
+    return bool(ex.intent and ex.intent not in (Intent.UNKNOWN, Intent.SPEAK_TO_HUMAN)) or bool(
+        ex.followup_topics
+    )
 
 
 def _answer(ex: Extraction) -> YesNo | None:
     """The caller's yes/no, whichever field the extractor put it in.
     What it answers is decided by state.pending_question, not by the field name."""
     return ex.confirms_case or ex.email_consent
+
+
+def _is_done(state: SessionState, ex: Extraction) -> bool:
+    """'That's all', or 'no' to 'Is there anything else I can help you with?'."""
+    return ex.wants_to_end or (state.pending_question == Pending.ANYTHING_ELSE and _answer(ex) == YesNo.NO)
+
+
+def _open_human_offer(state: SessionState, topic: str, for_request: bool = False) -> None:
+    """Start a fresh offer → re-offer → stop sequence."""
+    state.human_offer_topic = topic
+    state.human_offer_for_request = for_request
+    state.human_offer_declines = 0
 
 
 class SOPEngine:
@@ -156,6 +176,8 @@ class SOPEngine:
             self._remember(state, ex)
             plan = self._guards(state, ex) or self._phase_plan(state, ex, user_text)
             plan = self._stuck_check(state, ex, plan)
+            # How to respond to the caller's emotion, ahead of whatever the plan says.
+            plan.directive = self._tone(ex) + plan.directive
             self._note_off_topic_part(ex, plan)
             plan.acknowledge_emotion = ex.emotion != Emotion.NEUTRAL
             plan.require_apology = ex.emotion == Emotion.ANGRY
@@ -287,9 +309,7 @@ class SOPEngine:
         # "No." as done and the chat ended without the re-offer.)
         if offer_open and ex.wants_to_end and not ex.done_phrase:
             ex.wants_to_end = False
-        new_question = bool(ex.intent and ex.intent not in (Intent.UNKNOWN, Intent.SPEAK_TO_HUMAN)) or bool(
-            ex.followup_topics
-        )
+        new_question = _asks_something(ex)
 
         wants_human = ex.wants_human or ex.intent == Intent.SPEAK_TO_HUMAN
         if wants_human or (offer_open and answer == YesNo.YES):
@@ -320,13 +340,12 @@ class SOPEngine:
             if state.counters.off_topic >= Limits.OFF_TOPIC:
                 return self._escalate(state, "off_topic_limit")
         if ex.off_topic and not _has_on_topic_part(ex):
-            resume_directive, question, pending = self._resume(state)
+            question, pending = self._return_question(state)
             return ResponsePlan(
                 action="decline_off_topic",
                 directive=(
                     "The caller asked something unrelated to insurance claims. Do NOT answer it. "
-                    "Politely say you can only help with questions about their insurance claims, "
-                    f"and that you'd like to get back to {resume_directive}"
+                    "Politely say you can only help with questions about their insurance claims."
                 ),
                 fallback_text="I'm sorry, I can only help with questions about your insurance claims.",
                 closing_question=question,
@@ -363,7 +382,7 @@ class SOPEngine:
             if "email" in request else f"I'm not able to help with {request} here."
         )
         directive = (
-            f"{self._tone(ex)}Explain, in your own words: \"{explain}\" Do NOT ask for another "
+            f"Explain, in your own words: \"{explain}\" Do NOT ask for another "
             "email address and do not offer to change anything."
         )
         if state.handoff_requested:
@@ -407,12 +426,10 @@ class SOPEngine:
         fallback_text: str, reason: str, facts: list[str] | None = None,
         question: str = OFFER_HUMAN_QUESTION, for_request: bool = False,
     ) -> ResponsePlan:
-        state.human_offer_topic = topic
-        state.human_offer_for_request = for_request
-        state.human_offer_declines = 0
+        _open_human_offer(state, topic, for_request)
         return ResponsePlan(
             action="offer_human",
-            directive=f"{self._tone(ex)}{directive}",
+            directive=directive,
             fallback_text=fallback_text,
             facts=facts or [],
             closing_question=question,
@@ -427,7 +444,7 @@ class SOPEngine:
             return ResponsePlan(
                 action="reoffer_human",
                 directive=(
-                    f"{self._tone(ex)}Acknowledge their answer with understanding. Gently explain "
+                    f"Acknowledge their answer with understanding. Gently explain "
                     f"that speaking with a human representative is the recommended way to handle "
                     f"{topic}, because you aren't able to do it here. Do not pressure them."
                 ),
@@ -454,24 +471,15 @@ class SOPEngine:
                 reasons=["representative without consent declined a human twice"],
                 use_llm=False,
             )
-        question, pending = self._after_declined_offer(state)
+        question, pending = self._return_question(state, keep_open_offer=False)
         return ResponsePlan(
             action="human_offer_declined",
-            directive=f"{self._tone(ex)}Say okay, briefly and warmly. Do not mention the transfer again.",
+            directive="Say okay, briefly and warmly. Do not mention the transfer again.",
             fallback_text="Okay.",
             closing_question=question,
             pending_question=pending,
             reasons=["caller declined the human offer twice; stop offering"],
         )
-
-    def _after_declined_offer(self, state: SessionState) -> tuple[str, str | None]:
-        if state.phase == Phase.POST_PROCESS:
-            return self._email_question(state), Pending.OFFER_EMAIL
-        if state.phase == Phase.VERIFY_ID:
-            return self._identity_question(state), None
-        if state.phase == Phase.RESOLVE_INTENT and self._claims(state) and not state.discussed:
-            return WHICH_CLAIM_QUESTION, Pending.CHOOSE_CLAIM
-        return ANYTHING_ELSE_QUESTION, Pending.ANYTHING_ELSE
 
     def _stuck_check(self, state: SessionState, ex: Extraction, plan: ResponsePlan) -> ResponsePlan:
         """Safety net: if we're about to ask the exact same question a 3rd time in a row
@@ -482,8 +490,7 @@ class SOPEngine:
         you with?", so three different follow-up questions must not look stuck (live
         test: a third, different document question got a human offer)."""
         repeatable = plan.pending_question in (Pending.OFFER_HUMAN, Pending.OFFER_EMAIL)
-        signals = {"emotion", "off_topic", "done_phrase", "refusal_phrase"}
-        progress = bool(ex.useful_fields() - signals)
+        progress = _has_on_topic_part(ex)
         same_question = plan.closing_question and plan.closing_question == state.last_closing_question
         if same_question and not repeatable and not progress:
             state.repeat_count += 1
@@ -508,34 +515,31 @@ class SOPEngine:
 
     def _escalate(self, state: SessionState, reason: str) -> ResponsePlan:
         state.escalate(reason)
-        message = ESCALATION_MESSAGES[reason]
         return ResponsePlan(
             action="escalate",
-            directive=(
-                "You are transferring the caller to a human representative right now. Say so "
-                f"warmly in 1-2 sentences, conveying this message: \"{message}\" "
-                "Do not mention any limits, counts, or internal rules. Do not ask any question."
-            ),
-            fallback_text=message,
+            directive="",
+            fallback_text=ESCALATION_MESSAGES[reason],
             reasons=[reason],
             use_llm=False,  # the last message must state exactly what happens; no paraphrase
         )
 
-    def _resume(self, state: SessionState) -> tuple[str, str, str | None]:
-        """How to steer back after a detour: (topic for the directive, question, pending)."""
-        if state.pending_question == Pending.OFFER_HUMAN:
-            return ("the question you asked.", REOFFER_HUMAN_QUESTION, Pending.OFFER_HUMAN)
+    def _return_question(self, state: SessionState, keep_open_offer: bool = True) -> tuple[str, str | None]:
+        """The question to go back to after a detour (an off-topic question) or after the
+        caller declined a human twice (keep_open_offer=False): (question, pending)."""
+        if keep_open_offer and state.pending_question == Pending.OFFER_HUMAN:
+            return REOFFER_HUMAN_QUESTION, Pending.OFFER_HUMAN
         if state.phase == Phase.VERIFY_ID:
-            return ("verifying their identity.", self._identity_question(state), None)
+            return self._identity_question(state), None
         if state.phase == Phase.RESOLVE_INTENT:
-            # Re-ask whatever was open before the detour.
             if state.pending_question == Pending.CONFIRM_CLAIM and state.candidate_case_ids:
                 claim = self.data.get_claim(state.verified_party_id, state.candidate_case_ids[0])
-                return ("their claim.", self._confirm_question(claim), Pending.CONFIRM_CLAIM)
-            return ("their claim.", WHICH_CLAIM_QUESTION, Pending.CHOOSE_CLAIM)
+                return self._confirm_question(claim), Pending.CONFIRM_CLAIM
+            if self._claims(state) and not state.discussed:
+                return WHICH_CLAIM_QUESTION, Pending.CHOOSE_CLAIM
+            return ANYTHING_ELSE_QUESTION, Pending.ANYTHING_ELSE
         if state.phase == Phase.PROCESS_CASE:
-            return ("their claim.", ANYTHING_ELSE_QUESTION, Pending.ANYTHING_ELSE)
-        return ("wrapping up.", self._email_question(state), Pending.OFFER_EMAIL)
+            return ANYTHING_ELSE_QUESTION, Pending.ANYTHING_ELSE
+        return self._email_question(state), Pending.OFFER_EMAIL
 
     # --- Phase logic -------------------------------------------------------------------
 
@@ -678,7 +682,7 @@ class SOPEngine:
             return ResponsePlan(
                 action="full_id_rejected",
                 directive=(
-                    f"{tone}{noted}Convey this in your own words: \"{text}\" Do NOT repeat any "
+                    f"{noted}Convey this in your own words: \"{text}\" Do NOT repeat any "
                     "digits, and do not say you have their SSN or ID digits."
                 ),
                 fallback_text=text,
@@ -708,7 +712,7 @@ class SOPEngine:
                 return ResponsePlan(
                     action="verification_mismatch",
                     directive=(
-                        f"{tone}{full_id_note}Say you weren't able to verify their identity with the "
+                        f"{full_id_note}Say you weren't able to verify their identity with the "
                         "details so far, and that one more detail would help. Do NOT say which detail "
                         f"did not match. {explain_why}"
                     ),
@@ -719,7 +723,7 @@ class SOPEngine:
             return ResponsePlan(
                 action="verification_mismatch",
                 directive=(
-                    f"{tone}Say you weren't able to verify their identity with those details. Do NOT "
+                    f"Say you weren't able to verify their identity with those details. Do NOT "
                     "say which detail did not match."
                 ),
                 fallback_text="I'm sorry, I wasn't able to verify your identity with those details.",
@@ -739,7 +743,7 @@ class SOPEngine:
         return ResponsePlan(
             action="ask_identity",
             directive=(
-                f"{tone}{full_id_note}{explain_why}{noted}{unreadable_note}"
+                f"{full_id_note}{explain_why}{noted}{unreadable_note}"
                 "Briefly say you need a few more details to verify their identity. If they refused "
                 "one detail, reassure them that any of the others works instead."
             ),
@@ -796,7 +800,7 @@ class SOPEngine:
         return ResponsePlan(
             action="consent_waiting",
             directive=(
-                f"{self._tone(ex)}Say you're still waiting for {first}'s approval and will continue "
+                f"Say you're still waiting for {first}'s approval and will continue "
                 "as soon as it comes through. Do not share any claim details. If the caller says "
                 f"{first} already approved, explain kindly that the approval has to come through "
                 f"from {first}'s phone on our side."
@@ -834,7 +838,7 @@ class SOPEngine:
         return ResponsePlan(
             action="consent_no_retry",
             directive=(
-                f"{self._tone(ex)}Convey this in your own words: \"{text}\" Do NOT offer, promise or "
+                f"Convey this in your own words: \"{text}\" Do NOT offer, promise or "
                 "suggest sending another consent request. A human representative can help with "
                 "other options."
             ),
@@ -905,7 +909,7 @@ class SOPEngine:
         return ResponsePlan(
             action="confirm_claim",
             directive=(
-                f"{self._tone(ex)}{opener}Say you'd like to make sure you have the right claim. "
+                f"{opener}Say you'd like to make sure you have the right claim. "
                 "Do not share any claim details yet."
             ),
             fallback_text=opener_text or "Thank you.",
@@ -986,7 +990,7 @@ class SOPEngine:
         return ResponsePlan(
             action="no_matching_claim",
             directive=(
-                f"{self._tone(ex)}{opener}Say you couldn't find a {described} on their account. "
+                f"{opener}Say you couldn't find a {described} on their account. "
                 "Do not list or describe any of their claims."
             ),
             fallback_text=f"{opener_text} I couldn't find a {described} on your account.".strip(),
@@ -1011,7 +1015,7 @@ class SOPEngine:
         return ResponsePlan(
             action="ask_which_claim",
             directive=(
-                f"{self._tone(ex)}{opener}Say you can see there are some claims with us. Do NOT "
+                f"{opener}Say you can see there are some claims with us. Do NOT "
                 "list, count, or describe any of the claims."
             ),
             fallback_text=f"{opener_text} I see {owner} some claims with us.".strip(),
@@ -1030,7 +1034,7 @@ class SOPEngine:
         return ResponsePlan(
             action="narrow_claim",
             directive=(
-                f"{self._tone(ex)}{opener}Say you see more than one {described} on their account. "
+                f"{opener}Say you see more than one {described} on their account. "
                 "Do NOT list or describe the claims."
             ),
             fallback_text=f"{opener_text} I see more than one {described} on your account.".strip(),
@@ -1045,25 +1049,17 @@ class SOPEngine:
     ) -> ResponsePlan:
         """A verified caller with nothing on file. Ask how we can help; a claim question or
         an unsupported request (handled by the guards) leads to a human offer."""
-        done = ex.wants_to_end or (
-            state.pending_question == Pending.ANYTHING_ELSE and _answer(ex) == YesNo.NO
-        )
-        if done:
+        if _is_done(state, ex):
             state.transition(Phase.ENDED)
             return ResponsePlan(
                 action="close",
-                directive=(
-                    "Say that's no problem, they're welcome to contact us anytime, and say "
-                    "goodbye. Do not ask any question."
-                ),
+                directive="",
                 fallback_text="No problem. You're welcome to contact us anytime. Have a great day.",
                 reasons=["no claims on file; caller is done"],
                 use_llm=False,
             )
 
-        asked_about_claim = case_resolution.has_hints(_hints_from(ex)) or bool(
-            ex.intent and ex.intent not in (Intent.UNKNOWN, Intent.SPEAK_TO_HUMAN)
-        )
+        asked_about_claim = case_resolution.has_hints(_hints_from(ex)) or _asks_something(ex)
         if asked_about_claim and not just_verified:
             return self._offer_human(
                 state, ex, topic="a claim that isn't on file",
@@ -1084,7 +1080,7 @@ class SOPEngine:
         return ResponsePlan(
             action="no_claims_on_file",
             directive=(
-                f"{self._tone(ex)}{'Thank them for verifying their identity. ' if just_verified else ''}"
+                f"{'Thank them for verifying their identity. ' if just_verified else ''}"
                 "Say you don't see any existing claims with us. Do not suggest that any claim exists."
             ),
             fallback_text=(
@@ -1103,13 +1099,9 @@ class SOPEngine:
         self, state: SessionState, ex: Extraction, user_text: str, just_selected: bool = False
     ) -> ResponsePlan:
         claim = self.data.get_claim(state.verified_party_id, state.selected_case_id)
-        new_question = bool(ex.intent and ex.intent != Intent.UNKNOWN) or bool(ex.followup_topics)
 
         if not just_selected:
-            done = ex.wants_to_end or (
-                state.pending_question == Pending.ANYTHING_ELSE and _answer(ex) == YesNo.NO
-            )
-            if done and not new_question:
+            if _is_done(state, ex) and not _asks_something(ex):
                 state.transition(Phase.POST_PROCESS)
                 return self._offer_email(state, ex)
 
@@ -1142,14 +1134,12 @@ class SOPEngine:
                 "human claims representative needs to review their options. "
             )
             closing, pending = DEADLINE_HUMAN_QUESTION, Pending.OFFER_HUMAN
-            state.human_offer_topic = "a claim whose appeal deadline has passed"
-            state.human_offer_for_request = False
-            state.human_offer_declines = 0
+            _open_human_offer(state, "a claim whose appeal deadline has passed")
 
         return ResponsePlan(
             action="answer_case",
             directive=(
-                f"{self._tone(ex)}{'Thank them for confirming. ' if just_selected else ''}"
+                f"{'Thank them for confirming. ' if just_selected else ''}"
                 f"The caller's question is about: {intent.value.replace('_', ' ')}. Answer it "
                 f"naturally using ONLY the FACTS. {human}"
             ),
@@ -1192,7 +1182,7 @@ class SOPEngine:
         return ResponsePlan(
             action="offer_email",
             directive=(
-                f"{self._tone(ex)}{handoff}Say you can email them a summary of this conversation "
+                f"{handoff}Say you can email them a summary of this conversation "
                 "(what was discussed, the claim status, and next steps), and that they can see it "
                 "first with the 'Preview email' button."
             ),
@@ -1209,7 +1199,7 @@ class SOPEngine:
             return ResponsePlan(
                 action="ask_email_again",
                 directive=(
-                    f"{self._tone(ex)}If the caller asked a question, answer it briefly using ONLY "
+                    f"If the caller asked a question, answer it briefly using ONLY "
                     "the FACTS (for example, why a human representative is needed). Otherwise just "
                     "say you'd like to wrap up."
                 ),
@@ -1233,10 +1223,7 @@ class SOPEngine:
             goodbye = "Thank you for calling, and have a great day."
         return ResponsePlan(
             action="close",
-            directive=(
-                f"Confirm this to the caller and close the conversation: \"{sent}{goodbye}\" "
-                "Do not ask any question."
-            ),
+            directive="",
             fallback_text=sent + goodbye,
             reasons=[f"email consent={state.email.consent}", f"handoff={state.handoff_requested}"],
             use_llm=False,  # states exactly where the email went and what happens next
