@@ -60,7 +60,11 @@ _ACTION_CLAIM = re.compile(
     # Promises to send, not only past-tense claims (live test: "I'll go ahead and send
     # the summary…" before the caller had agreed).
     r"(?:i'll|i will|i'm going to|let me|i can go ahead and)\s+(?:now\s+|go ahead and\s+)?"
-    r"(?:send|email|forward)\b|(?:will|is going to) be (?:sent|emailed)|on its way)",
+    r"(?:send|email|forward)\b|(?:will|is going to) be (?:sent|emailed)|on its way|"
+    # Offering or claiming a (new) consent request (live test: "I can send another consent
+    # request to Margaret's phone" when nothing can be resent).
+    r"(?:send|sent|resend|re-send|have)\s+(?:you\s+|her\s+|\w+\s+)?(?:another|a new|a|the)\s+"
+    r"(?:consent\s+)?request)",
     re.IGNORECASE,
 )
 

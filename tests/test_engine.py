@@ -209,6 +209,42 @@ def test_no_response_button_and_nobody_clicking_both_stop_waiting():
     assert state.consent.status == "no_response" and not state.verified
 
 
+def test_regression_consent_is_not_resent_after_no_response():
+    engine, state, _, _ = start_david()
+    engine.consent_decision(state, "no_response")
+    engine.provider.extractions.append({})
+    r = engine.handle(state, "ok can u please try one more time?")
+    assert r.trace["plan"]["action"] == "consent_no_retry"
+    assert r.reply.startswith("Since I didn't receive consent from Margaret, I can't go ahead with your request right now.")
+    assert state.consent.status == "no_response" and not state.verified
+
+
+def test_after_denial_the_wording_says_she_did_not_consent():
+    engine, state, _, _ = start_david()
+    engine.consent_decision(state, "denied")
+    engine.provider.extractions.append({})
+    r = engine.handle(state, "Can you send her another request?")
+    assert r.reply.startswith("Since Margaret didn't give consent, I can't go ahead with your request right now.")
+
+
+def test_model_cannot_offer_to_resend_the_consent_request():
+    engine, state, _, _ = start_david(reply="I can send another consent request to Margaret's phone number on file.")
+    engine.consent_decision(state, "no_response")
+    engine.provider.extractions.append({})
+    r = engine.handle(state, "You can send another req to her? it'd be great if you can")
+    assert r.trace["response"]["source"] == "fallback"
+    assert "send another consent request" not in r.reply
+
+
+def test_declining_twice_after_failed_consent_still_closes():
+    engine, state, _, _ = start_david()
+    engine.consent_decision(state, "no_response")
+    for text in ("please try again", "no", "no"):
+        engine.provider.extractions.append({"confirms_case": "no"} if text == "no" else {})
+        last = engine.handle(state, text)
+    assert state.phase == Phase.ENDED and "contact us directly" in last.reply
+
+
 def test_consent_decision_is_rejected_when_nothing_is_pending():
     import pytest
 

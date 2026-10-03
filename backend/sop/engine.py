@@ -594,6 +594,10 @@ class SOPEngine:
         if state.consent.status == "pending":
             return self._consent_waiting(state, ex)
         if state.consent.status in ("denied", "no_response"):
+            if state.pending_question == Pending.OFFER_HUMAN:
+                # Already explained once: anything else, including "please send it again",
+                # gets the same answer. Consent requests are not resent.
+                return self._consent_no_retry(state, ex)
             return self._consent_failed(state, ex)
 
         # After a full SSN was rejected we asked for the last four on their own, so a
@@ -816,6 +820,28 @@ class SOPEngine:
             directive=f"Convey this kindly: \"{text}\" Say a human representative can help with other options.",
             fallback_text=f"{text} A human representative can help with other options.",
             reason=f"consent {state.consent.status}",
+        )
+
+    def _consent_no_retry(self, state: SessionState, ex: Extraction) -> ResponsePlan:
+        """Follow-ups after consent failed. The request is not resent (decided with Nidhi):
+        no retrying until the policyholder approves. The human offer stays open without
+        restarting its count, so two "no"s still close the call."""
+        first = self._holder_first_name(state)
+        if state.consent.status == "denied":
+            text = f"Since {first} didn't give consent, I can't go ahead with your request right now."
+        else:
+            text = f"Since I didn't receive consent from {first}, I can't go ahead with your request right now."
+        return ResponsePlan(
+            action="consent_no_retry",
+            directive=(
+                f"{self._tone(ex)}Convey this in your own words: \"{text}\" Do NOT offer, promise or "
+                "suggest sending another consent request. A human representative can help with "
+                "other options."
+            ),
+            fallback_text=f"{text} A human representative can help with other options.",
+            closing_question=REOFFER_HUMAN_QUESTION,
+            pending_question=Pending.OFFER_HUMAN,
+            reasons=[f"consent {state.consent.status}; not resent"],
         )
 
     def consent_decision(self, state: SessionState, decision: str) -> TurnResult:
