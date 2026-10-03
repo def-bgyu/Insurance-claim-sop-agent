@@ -22,7 +22,7 @@ from datetime import date
 from backend import config
 from backend.data import Claim, InsuranceData, get_data
 from backend.llm import prompts
-from backend.llm.extractor import FULL_SSN, Emotion, Extraction, YesNo, extract
+from backend.llm.extractor import Emotion, Extraction, YesNo, extract
 from backend.llm.provider import LLMProvider
 from backend.llm.responder import respond
 from backend.sop import case_resolution, grounding
@@ -37,7 +37,7 @@ from backend.sop.spec import (
     Phase,
 )
 from backend.sop.state import CaseHints, DiscussedItem, SessionState, Turn
-from backend.sop.normalize import normalize_email
+from backend.sop.normalize import FULL_SSN, normalize_email
 from backend.sop.verification import normalize_identity_value, verify_identity
 from backend.trace import TraceWriter, mask_fields, mask_value, public_snapshot, redact
 
@@ -95,6 +95,16 @@ def _describe_hints(hints: CaseHints) -> str:
     return text
 
 
+# Signals that describe HOW something was said, not WHAT. They never make a message
+# count as having an on-topic part.
+_STYLE_SIGNALS = {"off_topic", "emotion", "done_phrase", "refusal_phrase", "human_word"}
+OFF_TOPIC_NOTE = "I can only help with insurance claim questions, so I can't help with that part."
+
+
+def _has_on_topic_part(ex: Extraction) -> bool:
+    return bool(ex.useful_fields() - _STYLE_SIGNALS)
+
+
 def _answer(ex: Extraction) -> YesNo | None:
     """The caller's yes/no, whichever field the extractor put it in.
     What it answers is decided by state.pending_question, not by the field name."""
@@ -146,6 +156,7 @@ class SOPEngine:
             self._remember(state, ex)
             plan = self._guards(state, ex) or self._phase_plan(state, ex, user_text)
             plan = self._stuck_check(state, ex, plan)
+            self._note_off_topic_part(ex, plan)
             plan.acknowledge_emotion = ex.emotion != Emotion.NEUTRAL
             plan.require_apology = ex.emotion == Emotion.ANGRY
 
@@ -188,6 +199,19 @@ class SOPEngine:
                 state.caller_role = "representative"
             if ex.representative_name:
                 state.representative_name = ex.representative_name
+
+    def _note_off_topic_part(self, ex: Extraction, plan: ResponsePlan) -> None:
+        """A mixed message was handled as on-topic; the reply also declines the rest, so
+        the caller feels heard instead of half-ignored."""
+        if not ex.off_topic or plan.action in ("decline_off_topic", "escalate"):
+            return
+        plan.directive = (
+            "Start by saying briefly and politely that you can only help with insurance claim "
+            "questions, so you can't help with the unrelated part of their message (do not "
+            f"answer it). Then: {plan.directive}"
+        )
+        plan.fallback_text = f"{OFF_TOPIC_NOTE} {plan.fallback_text}".strip()
+        plan.reasons.append("mixed message: off-topic part declined")
 
     def _apply_reply_checks(self, state: SessionState, plan: ResponsePlan, outcome, user_text: str) -> None:
         """What the reply guards need: the data's claim-ID format, the identity values
@@ -247,20 +271,14 @@ class SOPEngine:
 
         offer_open = state.pending_question == Pending.OFFER_HUMAN
 
-        # What the caller typed outranks what the model inferred (live demo: "No this is
-        # so frustrating!!" to "Would you like me to connect you…?" was read as wanting a
+        # Wanting a human needs a human in the message ("transfer me", "a person", "a rep").
+        # Frustration alone is not a request to be transferred (live demo: "No this is so
+        # frustrating!!" to "Would you like me to connect you…?" was read as wanting a
         # human, and the caller was transferred after saying no).
-        # 1. Wanting a human needs a human in the message ("transfer me", "a person",
-        #    "a rep"); frustration alone is not a request to be transferred.
         if not ex.human_word:
             ex.wants_human = False
             if ex.intent == Intent.SPEAK_TO_HUMAN:
                 ex.intent = None
-        # 2. Starting with "no" while we ask "Would you like me to connect you?" declines
-        #    it, unless the caller explicitly asks to be transferred in the same breath.
-        if offer_open and ex.no_phrase and not ex.human_ask:
-            ex.wants_human = False
-            ex.confirms_case = ex.email_consent = YesNo.NO
 
         answer = _answer(ex)
 
@@ -293,11 +311,15 @@ class SOPEngine:
             if state.counters.frustration >= Limits.FRUSTRATION:
                 return self._escalate(state, "frustration_limit")
 
-        useful = ex.useful_fields() - {"off_topic", "emotion"}
-        if ex.off_topic and not useful:
+        # Any off-topic part counts as a strike, even inside an otherwise on-topic message.
+        # A message that is ONLY off-topic is declined here; a mixed one ("No email. What
+        # are the types of ML?") continues to the normal script step, and the reply also
+        # declines the off-topic part (see _note_off_topic_part).
+        if ex.off_topic:
             state.counters.off_topic += 1
             if state.counters.off_topic >= Limits.OFF_TOPIC:
                 return self._escalate(state, "off_topic_limit")
+        if ex.off_topic and not _has_on_topic_part(ex):
             resume_directive, question, pending = self._resume(state)
             return ResponsePlan(
                 action="decline_off_topic",
@@ -530,9 +552,10 @@ class SOPEngine:
     # (Refusal is handled where it matters: VERIFY_ID offers the other identity fields.)
     _TONE = {
         Emotion.FRUSTRATED: (
-            "The caller sounds frustrated. In one short sentence, acknowledge the situation (for "
-            "example, that this has taken a few steps) without labeling their feelings or using "
-            "stock phrases like 'I understand your frustration'. Then keep things moving. "
+            "The caller sounds frustrated. Open with one short, generic acknowledgment (for "
+            "example \"I understand, and I'm here to help\" or \"I understand how this might "
+            "feel\"), then keep things moving. Do not describe the conversation itself (how long "
+            "it has taken, going back and forth, how many times they've asked). "
         ),
         Emotion.ANGRY: (
             "The caller sounds angry. Open with a brief, sincere apology for their experience, "

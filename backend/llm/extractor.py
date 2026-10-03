@@ -19,6 +19,7 @@ from backend.data import Vocabulary
 from backend.llm import prompts
 from backend.llm.parsing import parse_json_object
 from backend.llm.provider import LLMProvider, LLMResult, Message
+from backend.sop.normalize import FULL_SSN
 from backend.sop.spec import Intent
 
 
@@ -80,9 +81,7 @@ class Extraction(BaseModel):
     full_id_given: bool = False  # a full SSN/ID was typed: its last four are discarded
     done_phrase: bool = False  # an explicit "that's all" / "bye", not just "no"
     refusal_phrase: bool = False  # an explicit refusal ("I won't give you that")
-    no_phrase: bool = False  # the message starts with "no" / "nope" / "nah"
     human_word: bool = False  # mentions a human, person, agent, representative, transfer…
-    human_ask: bool = False  # explicitly asks for one ("transfer me", "talk to a person")
 
     @field_validator("case_month", mode="before")
     @classmethod
@@ -181,8 +180,6 @@ _LAST4_CONTEXT = re.compile(
     re.IGNORECASE,
 )
 _DOB_CONTEXT = re.compile(r"\b(?:dob|d\.o\.b|birth|born|birthday)\b", re.IGNORECASE)
-# A full SSN (123-45-6789, 123 45 6789, 123456789). Phones (3-3-4) don't match.
-FULL_SSN = re.compile(r"\b\d{3}[-\s.]?\d{2}[-\s.]?\d{4}\b")
 _REFUSAL = re.compile(
     r"\b(?:won'?t|will not|not (?:going to|gonna)|rather not|don'?t want to|do not want to|"
     r"not comfortable)\b[^.?!]{0,30}?\b(?:give|share|provide|tell|giving|sharing|providing)\b"
@@ -192,12 +189,6 @@ _REFUSAL = re.compile(
 _HUMAN_WORD = re.compile(
     r"\b(?:human|person|people|agent|representative|rep|someone|somebody|supervisor|manager|"
     r"operator|transfer|real person)\b",
-    re.IGNORECASE,
-)
-_HUMAN_ASK = re.compile(
-    r"\b(?:transfer|connect|put)\s+me\b|"
-    r"\b(?:talk|speak)\s+(?:to|with)\s+(?:a|an|the|your|some)?\s*"
-    r"(?:human|person|agent|representative|rep|someone|somebody|supervisor|manager|operator)\b",
     re.IGNORECASE,
 )
 _POLICY = re.compile(r"\bPOL-?\d+\b", re.IGNORECASE)  # used when no data vocabulary is given
@@ -340,9 +331,7 @@ def extract(
     merged["full_id_given"] = bool(FULL_SSN.search(user_text))
     merged["done_phrase"] = bool(_DONE.search(user_text))
     merged["refusal_phrase"] = bool(_REFUSAL.search(user_text))
-    merged["no_phrase"] = bool(_NO.match(user_text))
     merged["human_word"] = bool(_HUMAN_WORD.search(user_text))
-    merged["human_ask"] = bool(_HUMAN_ASK.search(user_text))
     if merged["full_id_given"]:
         merged.pop("id_last4", None)
     return ExtractionOutcome(coerce_extraction(merged), layer, regex_fields, result)

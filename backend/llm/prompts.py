@@ -45,7 +45,7 @@ Fields:
   A plain question, disagreement, correction, short answer, typo, or "!!!" on its own is "neutral". If the caller says they are not frustrated, it is "neutral".
 - refuses_to_share: true ONLY if the caller explicitly declines to give a requested detail ("I won't give you my SSN", "I'm not sharing that"). Worry or questions about privacy ("I'm worried you'll share my information") are NOT refusal; that is "anxious".
 - unsupported_request: if the caller wants something insurance-related that this line cannot do, a short description of it, e.g. "filing a new claim", "changing your policy", "updating your email address", "updating your phone number", "updating your address", "a billing question"; else null. This line can only look up existing claims (status, denial reasons, payments, required documents, next steps). It can NEVER change personal details, including sending anything to a different email address than the one on file.
-- off_topic: true if the message is unrelated to insurance, claims, their policy, or this call: general-knowledge or trivia questions, coding, weather, or asking what an unexplained term or acronym means ("What is RL?") when the caller doesn't connect it to their policy or claim. Greetings, small talk about their situation, or complaints about the process are NOT off topic. An off-topic question is not "confused".
+- off_topic: true if the message, or ANY PART of it, asks about something unrelated to insurance, claims, their policy, or this call: general-knowledge or trivia questions, coding, weather, or asking what an unexplained term or acronym means ("What is RL?") when the caller doesn't connect it to their policy or claim. Example: "No, I don't want an email. What are the types of ML?" is off_topic true (and email_consent "no"). Greetings, thanks, polite small talk ("how's your day?"), or complaints about the process are NOT off topic. An off-topic question is not "confused".
 - wants_human: true ONLY if the caller asks to be transferred to or to speak with a human, agent, supervisor, or representative ("can I talk to a person?", "transfer me"). A question or complaint ABOUT a transfer ("why do I have to talk to a human?") is false.
 - wants_to_end: true if the caller indicates they are done ("no that's all", "thanks, bye")
 
@@ -82,7 +82,7 @@ _RESPONDER_TEMPLATE = """You are a virtual assistant on an insurance company's c
 How you speak:
 - Warm, calm, professional, and concise: usually 1-4 sentences. Plain text, no markdown, no lists unless listing claims.
 - Never guess or comment on the caller's feelings (no "I understand your frustration", "I hear you", "I know this is upsetting") unless the TURN PLAN tells you to acknowledge them. Never argue.
-- When the TURN PLAN does ask you to acknowledge feelings, acknowledge the situation in your own words rather than labeling their emotion, and never reuse an empathy line from earlier in the conversation.
+- When the TURN PLAN does ask you to acknowledge feelings, keep it to one short, generic line ("I understand, and I'm here to help") and never reuse the same line twice. Never make claims about the conversation itself (that it has taken a while, gone back and forth, or been repeated) unless the TURN PLAN says so.
 - Sound like a person, not a form. Do not repeat the same sentence you used earlier in the conversation.
 
 Rules you must never break:

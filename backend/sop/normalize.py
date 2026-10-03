@@ -11,6 +11,9 @@ from datetime import datetime
 from dateutil import parser as date_parser
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# A full SSN (123-45-6789, 123 45 6789, 123456789); phones (3-3-4) don't match. Shared by
+# the extractor (to discard it) and trace masking (to hide it).
+FULL_SSN = re.compile(r"\b\d{3}[-\s.]?\d{2}[-\s.]?\d{4}\b")
 
 
 def name_tokens(name: str) -> list[str]:

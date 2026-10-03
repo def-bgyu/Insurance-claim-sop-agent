@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 
 from backend.config import ROOT_DIR
+from backend.sop.normalize import FULL_SSN
 from backend.sop.spec import IdentityField
 from backend.sop.state import SessionState
 
@@ -23,7 +24,6 @@ _LAST4 = re.compile(
     r"(\b(?:ssn|social(?: security)?|national id|last (?:four|4)(?: digits)?)\b\D{0,25}?)\d{3}(\d)\b",
     re.IGNORECASE,
 )
-_FULL_SSN = re.compile(r"\b\d{3}[-\s.]?\d{2}[-\s.]?\d{4}\b")
 # A written-out date right after a DOB cue: "born 15 March 1985", "DOB is March 15, 1985".
 _MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?"
 _WORD_DATE = rf"(?:\d{{1,2}}(?:st|nd|rd|th)?\s+(?:of\s+)?{_MONTH}|{_MONTH}\s+\d{{1,2}}(?:st|nd|rd|th)?),?\s+(?:19|20)\d{{2}}"
@@ -70,7 +70,7 @@ def _mask_structured(match: re.Match) -> str:
 def mask_text(text: str) -> str:
     """Pattern-based masking for free text (caller messages, raw model output)."""
     text = _STRUCTURED.sub(_mask_structured, text)
-    text = _FULL_SSN.sub("***-**-****", text)
+    text = FULL_SSN.sub("***-**-****", text)
     text = _EMAIL.sub(r"\1***\2", text)
     text = _DOB_WORD_DATE.sub(r"\1****-**-**", text)
     text = _ISO_DATE.sub(r"\1-**-**", text)

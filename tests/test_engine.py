@@ -117,7 +117,7 @@ def test_frustrated_caller_gets_empathy_not_claim_details():
     )
     plan = results[1].trace["plan"]
     assert plan["action"] == "ask_identity"
-    assert "protected" in plan["directive"] and "acknowledge the situation" in plan["directive"]
+    assert "protected" in plan["directive"] and "generic acknowledgment" in plan["directive"]
     assert state.counters.frustration == 1 and state.phase == Phase.VERIFY_ID
     assert_no_claim_data_before_verification(results)
 
@@ -640,7 +640,9 @@ def test_each_emotion_gets_its_own_guidance():
     assert "apology" in _directive_for("angry")
     assert "Reassure" in _directive_for("anxious")
     assert "plain words" in _directive_for("confused")
-    assert "acknowledge the situation" in _directive_for("frustrated")
+    assert "generic acknowledgment" in _directive_for("frustrated")
+    # A first frustrated message must not be told "we've been going back and forth".
+    assert "Do not describe the conversation itself" in _directive_for("frustrated")
     assert "sounds" not in _directive_for("neutral")
 
 

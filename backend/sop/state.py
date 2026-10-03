@@ -26,12 +26,10 @@ class CaseHints(BaseModel):
     day: int | None = None
     year: int | None = None
     case_id: str | None = None
-    notes: list[str] = Field(default_factory=list)  # free-text details worth keeping
 
 
 class EmailState(BaseModel):
     offered: bool = False
-    preview_shown: bool = False
     consent: bool | None = None  # None = not answered yet
 
 

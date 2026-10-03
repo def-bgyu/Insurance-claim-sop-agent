@@ -137,6 +137,35 @@ def test_no_followed_by_an_explicit_transfer_request_is_honored():
     assert state.handoff_requested
 
 
+# --- Mixed messages: an on-topic answer plus an off-topic question ---------------------
+
+
+def test_mixed_message_handles_the_answer_declines_the_rest_and_counts_a_strike():
+    state, results, _ = run(
+        [MARGARET_EXTRACTION, {"confirms_case": "yes"}, {"wants_to_end": True},
+         {"email_consent": "no", "off_topic": True}],
+        [MARGARET_OPENING, "yes", "that's all",
+         "No I don't want an email. Tell me what are types of ML"],
+    )
+    last = results[-1]
+    assert last.trace["plan"]["action"] == "close"  # the email answer was still processed
+    assert last.reply.startswith("I can only help with insurance claim questions")
+    assert "won't send an email" in last.reply
+    assert state.counters.off_topic == 1 and state.email.consent is False
+
+
+def test_purely_off_topic_message_is_still_declined_as_before():
+    _, results, _ = run([{"off_topic": True}], ["Tell me what are types of ML"])
+    assert results[0].trace["plan"]["action"] == "decline_off_topic"
+    assert not results[0].reply.startswith("I can only help with insurance claim questions, so I can't help with that part")
+
+
+def test_polite_small_talk_alongside_an_answer_is_not_a_strike():
+    # The model is told small talk isn't off-topic; this checks code adds no strike for it.
+    state, _, _ = run([{"full_name": "Margaret Chen"}], ["Margaret Chen. Hope your day is going well!"])
+    assert state.counters.off_topic == 0
+
+
 def test_reply_cannot_claim_verification_that_did_not_happen():
     state, results, _ = run(
         [{**MARGARET_EXTRACTION, "id_last4": "4472"}, {"emotion": "frustrated"}],
