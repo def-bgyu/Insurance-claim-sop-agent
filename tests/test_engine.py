@@ -285,11 +285,21 @@ AVA_TEXT = "Ava Martinez Lopez, 1990 21st august, 9180, ava.lopez@email.com"
 
 def test_regression_no_claims_on_file_is_said_plainly():
     state, results, _ = run([AVA, {"case_type": "healthcare"}], [AVA_TEXT, "my healthcare claim"])
-    for r in results:
-        assert r.trace["plan"]["action"] == "offer_human"
-        assert "don't see any claims" in r.reply and "these claims" not in r.reply
-        assert "Which claim" not in r.reply
+    verified, asked = results
+    assert verified.trace["plan"]["action"] == "no_claims_on_file"
+    assert verified.reply == (
+        "Thank you for verifying your identity. I don't see any existing claims with us. "
+        "What can I help you with today?"
+    )
+    # Asking about a claim anyway -> nothing to look up, offer a human.
+    assert asked.trace["plan"]["action"] == "offer_human"
+    assert "don't see any claims on file" in asked.reply and "Which claim" not in asked.reply
     assert state.verified and state.pending_question == "offer_human"
+
+
+def test_no_claims_caller_with_nothing_else_closes():
+    state, results, _ = run([AVA, {}], [AVA_TEXT, "nothing, thanks"])
+    assert results[1].trace["plan"]["action"] == "close" and state.phase == Phase.ENDED
 
 
 def test_regression_new_claim_request_flow_from_the_conversation():
@@ -356,6 +366,56 @@ def test_stuck_loop_offers_a_human_instead_of_repeating():
     asks = [r.trace["plan"]["action"] for r in results]
     assert asks == ["ask_identity", "ask_identity", "offer_human"]
     assert "stuck" in results[2].trace["plan"]["reasons"][0]
+
+
+# --- Claims are never listed (feedback from live test) ------------------------------
+
+
+def _no_claim_details(reply: str):
+    assert "CL-" not in reply and "2026" not in reply and "2025" not in reply
+
+
+def test_after_verification_claims_are_not_listed():
+    _, results, _ = run([VERIFIED], ["Margaret Chen, 1985-03-15, ssn 4472"])
+    r = results[0]
+    assert r.trace["plan"]["action"] == "ask_which_claim"
+    assert r.trace["plan"]["facts"] == []  # the model isn't even given the claims
+    assert r.reply == "Thank you, you're verified. I see you have some claims with us. Which claim are you calling about?"
+
+
+def test_ambiguous_description_asks_for_a_distinguishing_detail():
+    state, results, _ = run(
+        [VERIFIED, {"case_type": "healthcare"}, {"case_status": "denied"}, {"confirms_case": "yes"}],
+        ["Margaret Chen, 1985-03-15, ssn 4472", "my healthcare claim", "the denied one", "yes"],
+    )
+    narrow = results[1]
+    assert narrow.trace["plan"]["action"] == "narrow_claim"
+    assert narrow.reply == (
+        "I see more than one healthcare claim on your account. To find the right one, could you "
+        "tell me when it was filed, its status, or the claim number?"
+    )
+    _no_claim_details(narrow.reply)
+    assert results[2].trace["plan"]["action"] == "confirm_claim"
+    assert state.selected_case_id == "CL-2048"
+
+
+def test_claim_can_be_identified_by_filing_date():
+    state, results, _ = run(
+        [VERIFIED, {"case_month": 1, "case_day": "28th", "case_year": 2025}, {"confirms_case": "yes"}],
+        ["Margaret Chen, 1985-03-15, ssn 4472", "the one I filed on January 28th 2025", "yes"],
+    )
+    assert "CL-2011" in results[1].reply and state.selected_case_id == "CL-2011"
+
+
+def test_no_match_does_not_reveal_other_claims():
+    _, results, _ = run(
+        [VERIFIED, {"case_type": "life"}],
+        ["Margaret Chen, 1985-03-15, ssn 4472", "my life insurance claim"],
+    )
+    r = results[1]
+    assert r.trace["plan"]["action"] == "no_matching_claim"
+    assert "couldn't find a life claim" in r.reply
+    _no_claim_details(r.reply)
 
 
 def test_email_preview_contains_discussion_outcome_and_next_steps():

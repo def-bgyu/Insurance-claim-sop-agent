@@ -23,6 +23,7 @@ class CaseHints(BaseModel):
     case_type: str | None = None  # healthcare | dental | auto | ...
     status: str | None = None  # denied | open | closed | ...
     month: int | None = None
+    day: int | None = None
     year: int | None = None
     case_id: str | None = None
     notes: list[str] = Field(default_factory=list)  # free-text details worth keeping

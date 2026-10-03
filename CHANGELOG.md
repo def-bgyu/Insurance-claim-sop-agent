@@ -5,6 +5,38 @@ inspected (`git show <commit>`) or rolled back (`git revert <commit>`).
 
 ---
 
+## 0.4.0: Claims are never listed; the caller describes the claim
+
+**Feedback from live testing.** Right after verification the agent listed every
+claim on the account with IDs, types, dates and statuses. That's more than the
+caller needs to see, and more than a support agent should volunteer.
+
+**Changes** (wording agreed with Nidhi)
+1. **Claims on file, caller hasn't said which:** "I see you have some claims with
+   us. Which claim are you calling about?" No list; the model is given no claim
+   facts at all for that turn.
+2. **Caller identifies the claim by any claim detail:** claim number, type,
+   status, month/year, or the exact filing date. New `case_day` hint so "the one
+   filed January 28th" works.
+3. **Description matches several claims:** no list. Code works out which details
+   actually differ between them (`case_resolution.distinguishing_details`) and asks
+   for one: e.g. "I see more than one healthcare claim on your account. To find
+   the right one, could you tell me when it was filed, its status, or the claim
+   number?"
+4. **Nothing matches:** "I couldn't find a … on your account", then asks for more
+   detail, still without revealing what the caller does have.
+5. **No claims on file:** "Thank you for verifying your identity. I don't see any
+   existing claims with us. What can I help you with today?" A question about a
+   claim anyway, or a request we can't handle, goes to the human-offer flow;
+   "nothing" ends the chat.
+6. Only the single claim the caller pointed to is ever named, in the
+   confirmation question ("Just to confirm, are you calling about claim CL-2048…?").
+
+Note: the policy number identifies the account, not a claim (all of Margaret's
+claims are under POL-9921), so it stays a lookup hint only.
+
+---
+
 ## 0.3.0: Human-transfer flow, no-claims callers, action guard, loop safety net
 
 **Bug found in live testing (Ava Lopez, who has no claims).** After verification

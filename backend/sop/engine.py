@@ -78,17 +78,18 @@ def _join_or(items: list[str]) -> str:
 def _hints_from(ex: Extraction) -> CaseHints:
     return CaseHints(
         case_type=ex.case_type, status=ex.case_status, month=ex.case_month,
-        year=ex.case_year, case_id=ex.case_id,
+        day=ex.case_day, year=ex.case_year, case_id=ex.case_id,
     )
 
 
 def _describe_hints(hints: CaseHints) -> str:
     """The caller's own description of their case, e.g. 'denied healthcare claim from January'."""
     month = date(2000, hints.month, 1).strftime("%B") if hints.month else None
+    day = hints.day if month else None
     parts = [hints.status, hints.case_type, "claim"]
     text = " ".join(p for p in parts if p)
     if month or hints.year:
-        text += " from " + " ".join(str(p) for p in (month, hints.year) if p)
+        text += " from " + " ".join(str(p) for p in (month, day, hints.year) if p)
     if hints.case_id:
         text += f" ({hints.case_id})"
     return text
@@ -163,7 +164,7 @@ class SOPEngine:
         hints = state.hints
         for attr, value in (
             ("case_id", ex.case_id), ("case_type", ex.case_type), ("status", ex.case_status),
-            ("month", ex.case_month), ("year", ex.case_year),
+            ("month", ex.case_month), ("day", ex.case_day), ("year", ex.case_year),
         ):
             if value is not None:
                 setattr(hints, attr, value)
@@ -546,7 +547,7 @@ class SOPEngine:
         turn_hints = _hints_from(ex)
 
         if not claims:
-            return self._no_claims(state, ex, opener, opener_text)
+            return self._no_claims(state, ex, opener, opener_text, just_verified)
 
         if state.pending_question == Pending.CONFIRM_CLAIM and state.candidate_case_ids:
             candidate = by_id[state.candidate_case_ids[0]]
@@ -575,7 +576,7 @@ class SOPEngine:
                 )
 
         if not case_resolution.has_hints(state.hints):
-            return self._list_claims(state, claims, ex, opener, opener_text, "ask_which_claim")
+            return self._ask_which_claim(state, claims, ex, opener, opener_text)
 
         matches = case_resolution.match_claims(claims, state.hints)
         if len(matches) == 1:
@@ -588,24 +589,71 @@ class SOPEngine:
                 ["one claim matches remembered hints", _describe_hints(state.hints)],
             )
         if len(matches) > 1:
-            return self._list_claims(state, matches, ex, opener, opener_text, "choose_claim")
+            return self._narrow(state, matches, ex, opener, opener_text)
 
-        # Nothing matches what they described: say so and show what they do have.
+        # Nothing matches what they described. Say so, without revealing what they do have.
         described = _describe_hints(state.hints)
         state.hints = CaseHints()
-        plan = self._list_claims(state, claims, ex, opener, opener_text, "no_matching_claim")
-        plan.directive = f"Say you couldn't find a {described} on their account. " + plan.directive
-        plan.fallback_text = (
-            f"{opener_text} I couldn't find a {described} on your account. "
-            + plan.fallback_text.removeprefix(opener_text).strip()
-        ).strip()
-        return plan
+        state.candidate_case_ids = [c.case_id for c in claims]
+        return ResponsePlan(
+            action="no_matching_claim",
+            directive=(
+                f"{self._tone(ex)}{opener}Say you couldn't find a {described} on their account. "
+                "Do not list or describe any of their claims."
+            ),
+            fallback_text=f"{opener_text} I couldn't find a {described} on your account.".strip(),
+            closing_question=(
+                "Could you tell me a bit more about the claim, such as its claim number, what type "
+                "of claim it is, when it was filed, or its status?"
+            ),
+            pending_question=Pending.CHOOSE_CLAIM,
+            reasons=[f"no claim matches: {described}"],
+        )
+
+    # Claims are never listed: the caller describes the claim, the code finds it, and
+    # only the one claim they pointed to is ever named (in the confirmation question).
+
+    def _ask_which_claim(
+        self, state: SessionState, claims: list[Claim], ex: Extraction, opener: str, opener_text: str
+    ) -> ResponsePlan:
+        state.candidate_case_ids = [c.case_id for c in claims]
+        return ResponsePlan(
+            action="ask_which_claim",
+            directive=(
+                f"{self._tone(ex)}{opener}Say you can see they have some claims with us. Do NOT "
+                "list, count, or describe any of their claims."
+            ),
+            fallback_text=f"{opener_text} I see you have some claims with us.".strip(),
+            closing_question=WHICH_CLAIM_QUESTION,
+            pending_question=Pending.CHOOSE_CLAIM,
+            reasons=[f"{len(claims)} claims on file; caller hasn't said which"],
+        )
+
+    def _narrow(
+        self, state: SessionState, matches: list[Claim], ex: Extraction, opener: str, opener_text: str
+    ) -> ResponsePlan:
+        """Several claims fit the description: ask for a detail that separates them."""
+        state.candidate_case_ids = [c.case_id for c in matches]
+        described = _describe_hints(state.hints)
+        details = case_resolution.distinguishing_details(matches)
+        return ResponsePlan(
+            action="narrow_claim",
+            directive=(
+                f"{self._tone(ex)}{opener}Say you see more than one {described} on their account. "
+                "Do NOT list or describe the claims."
+            ),
+            fallback_text=f"{opener_text} I see more than one {described} on your account.".strip(),
+            closing_question=f"To find the right one, could you tell me {_join_or(details)}?",
+            pending_question=Pending.CHOOSE_CLAIM,
+            reasons=[f"{len(matches)} claims match: {described}", f"ask for: {details}"],
+        )
 
     def _no_claims(
-        self, state: SessionState, ex: Extraction, opener: str, opener_text: str
+        self, state: SessionState, ex: Extraction, opener: str, opener_text: str,
+        just_verified: bool,
     ) -> ResponsePlan:
-        """A verified caller with nothing on file. There's nothing to look up and nothing
-        to summarize by email, so: offer a human, and close when they're done."""
+        """A verified caller with nothing on file. Ask how we can help; a claim question or
+        an unsupported request (handled by the guards) leads to a human offer."""
         done = ex.wants_to_end or (
             state.pending_question == Pending.ANYTHING_ELSE and _answer(ex) == YesNo.NO
         )
@@ -620,45 +668,41 @@ class SOPEngine:
                 fallback_text="No problem. You're welcome to contact us anytime. Have a great day.",
                 reasons=["no claims on file; caller is done"],
             )
-        asked = (
-            f"Acknowledge they asked about their {_describe_hints(state.hints)}. "
-            if case_resolution.has_hints(state.hints) else ""
+
+        asked_about_claim = case_resolution.has_hints(_hints_from(ex)) or bool(
+            ex.intent and ex.intent not in (Intent.UNKNOWN, Intent.SPEAK_TO_HUMAN)
         )
-        return self._offer_human(
-            state, ex, topic="questions about claims that aren't on file",
+        if asked_about_claim and not just_verified:
+            return self._offer_human(
+                state, ex, topic="a claim that isn't on file",
+                directive=(
+                    "Say you don't see any claims on file for their account, so there's nothing for "
+                    "you to look up. Do not suggest that any claim exists. Say a human "
+                    "representative can help, for example if a claim hasn't been filed yet."
+                ),
+                fallback_text=(
+                    "I don't see any claims on file for your account, so there's nothing for me to "
+                    "look up. A human representative can help, for example if a claim hasn't been "
+                    "filed yet."
+                ),
+                facts=["The caller's account has no claims on file."],
+                reason="caller asked about a claim, but none are on file",
+            )
+
+        return ResponsePlan(
+            action="no_claims_on_file",
             directive=(
-                f"{opener}{asked}Tell them there are no claims on file for their account, so there "
-                "are no claim details to look up. Do not suggest that any claim exists. Say a human "
-                "representative can help with anything else, such as starting a new claim."
+                f"{self._tone(ex)}{'Thank them for verifying their identity. ' if just_verified else ''}"
+                "Say you don't see any existing claims with us. Do not suggest that any claim exists."
             ),
             fallback_text=(
-                f"{opener_text} I don't see any claims on file for your account. A human "
-                "representative can help with anything else, such as starting a new claim."
-            ).strip(),
-            facts=["The caller's account has no claims on file."],
-            reason="verified caller has no claims on file",
-        )
-
-    def _list_claims(
-        self, state: SessionState, claims: list[Claim], ex: Extraction, opener: str,
-        opener_text: str, action: str,
-    ) -> ResponsePlan:
-        assert claims, "_list_claims needs at least one claim; see _no_claims"
-        claims = sorted(claims, key=lambda c: c.created_at, reverse=True)
-        state.candidate_case_ids = [c.case_id for c in claims]
-        labels = [case_resolution.describe_claim(c) for c in claims]
-        listing = "; ".join(labels)
-        return ResponsePlan(
-            action=action,
-            directive=(
-                f"{self._tone(ex)}{opener}Briefly list these claims on their account so they can "
-                f"choose: {listing}. Do not share any other claim details yet."
+                f"{'Thank you for verifying your identity. ' if just_verified else ''}"
+                "I don't see any existing claims with us."
             ),
-            fallback_text=f"{opener_text} I see these claims on your account: {listing}.".strip(),
-            facts=[f"Claim on account: {label}." for label in labels],
-            closing_question=WHICH_CLAIM_QUESTION,
-            pending_question=Pending.CHOOSE_CLAIM,
-            reasons=[f"{len(claims)} claims to choose from"],
+            facts=["The caller's account has no claims on file."],
+            closing_question="What can I help you with today?",
+            pending_question=Pending.ANYTHING_ELSE,
+            reasons=["verified caller has no claims on file"],
         )
 
     # PROCESS_CASE -------------------------------------------------------------------------

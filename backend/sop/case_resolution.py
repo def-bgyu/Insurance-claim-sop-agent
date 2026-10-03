@@ -9,7 +9,7 @@ from backend.sop.state import CaseHints
 
 
 def has_hints(hints: CaseHints) -> bool:
-    return any([hints.case_id, hints.case_type, hints.status, hints.month, hints.year])
+    return any([hints.case_id, hints.case_type, hints.status, hints.month, hints.day, hints.year])
 
 
 def match_claims(claims: list[Claim], hints: CaseHints) -> list[Claim]:
@@ -22,10 +22,26 @@ def match_claims(claims: list[Claim], hints: CaseHints) -> list[Claim]:
         matches = [c for c in matches if c.status == hints.status]
     if hints.month:
         matches = [c for c in matches if c.created_at.month == hints.month]
+    if hints.day:
+        matches = [c for c in matches if c.created_at.day == hints.day]
     if hints.year:
         matches = [c for c in matches if c.created_at.year == hints.year]
     # Newest first, so lists read naturally.
     return sorted(matches, key=lambda c: c.created_at, reverse=True)
+
+
+def distinguishing_details(claims: list[Claim]) -> list[str]:
+    """Which details would tell these claims apart, phrased for the caller.
+    Lets the agent narrow down without listing the claims."""
+    details = []
+    if len({c.case_type for c in claims}) > 1:
+        details.append("what type of claim it is")
+    if len({c.created_at for c in claims}) > 1:
+        details.append("when it was filed")
+    if len({c.status for c in claims}) > 1:
+        details.append("its status")
+    details.append("the claim number")
+    return details
 
 
 def describe_claim(claim: Claim) -> str:

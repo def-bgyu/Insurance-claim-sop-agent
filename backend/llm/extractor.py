@@ -66,6 +66,7 @@ class Extraction(BaseModel):
     case_type: str | None = None
     case_status: str | None = None
     case_month: int | None = None
+    case_day: int | None = None
     case_year: int | None = None
     case_id: str | None = None
 
@@ -99,6 +100,19 @@ class Extraction(BaseModel):
     @classmethod
     def _month_range(cls, v: int | None):
         return v if v is None or 1 <= v <= 12 else None
+
+    @field_validator("case_day", mode="before")
+    @classmethod
+    def _day(cls, v: Any):
+        if isinstance(v, str):  # "12th", "the 12"
+            digits = re.sub(r"\D", "", v)
+            return int(digits) if digits else None
+        return v
+
+    @field_validator("case_day")
+    @classmethod
+    def _day_range(cls, v: int | None):
+        return v if v is None or 1 <= v <= 31 else None
 
     @field_validator("case_status", mode="before")
     @classmethod
@@ -197,7 +211,9 @@ _CLAIM_MONTH = re.compile(
 )
 _YES = re.compile(r"^\s*(?:yes|yeah|yep|yup|correct|right|sure|please do|that's (?:it|right|the one))\b", re.I)
 _NO = re.compile(r"^\s*(?:no|nope|nah|not really|no thanks)\b", re.I)
-_DONE = re.compile(r"\b(?:that's all|that is all|nothing else|that's it for|i'm done|bye)\b", re.I)
+_DONE = re.compile(
+    r"^\s*nothing\b|\b(?:that's all|that is all|nothing else|that's it for|i'm done|bye)\b", re.I
+)
 
 
 def keyword_hints(text: str) -> dict[str, str]:

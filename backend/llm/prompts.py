@@ -32,6 +32,7 @@ Fields:
 - case_type: kind of claim mentioned: "healthcare", "dental", "auto", or another single word
 - case_status: claim status the caller mentions: "denied", "open", or "closed"
 - case_month: month number (1-12) the claim is from, if mentioned
+- case_day: day of the month (1-31) the claim was filed, if a specific date is mentioned
 - case_year: four-digit year the claim is from, if mentioned
 - case_id: claim id such as "CL-2048"
 - intent: what the caller wants, one of:
@@ -48,7 +49,7 @@ Fields:
 
 Example:
 Message: "I'm the policyholder, Margaret Chen. Calling about my denied dental claim from March. DOB 3/15/1985."
-<json>{{"full_name": "Margaret Chen", "dob": "1985-03-15", "phone": null, "email": null, "id_last4": null, "policy_number": null, "caller_role": "policyholder", "representative_name": null, "case_type": "dental", "case_status": "denied", "case_month": 3, "case_year": null, "case_id": null, "intent": "denial_question", "followup_topic": null, "confirms_case": null, "email_consent": null, "emotion": "neutral", "refuses_to_share": false, "unsupported_request": null, "off_topic": false, "wants_human": false, "wants_to_end": false}}</json>"""
+<json>{{"full_name": "Margaret Chen", "dob": "1985-03-15", "phone": null, "email": null, "id_last4": null, "policy_number": null, "caller_role": "policyholder", "representative_name": null, "case_type": "dental", "case_status": "denied", "case_month": 3, "case_day": null, "case_year": null, "case_id": null, "intent": "denial_question", "followup_topic": null, "confirms_case": null, "email_consent": null, "emotion": "neutral", "refuses_to_share": false, "unsupported_request": null, "off_topic": false, "wants_human": false, "wants_to_end": false}}</json>"""
 
 
 def extractor_system(phase: str, last_agent_message: str | None, topics: list[str]) -> str:
