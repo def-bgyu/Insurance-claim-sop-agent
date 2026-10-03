@@ -129,9 +129,9 @@ def _generate(
     result = provider.complete(system, _history(state), max_tokens=500)
     if result.error or not result.text.strip():
         return "", result, ["llm_error"]
-    body = clean_reply(result.text)
-    if plan.closing_question:
-        body = strip_trailing_questions(body)
+    # Questions are code-owned: any question the model adds at the end is removed, whether
+    # or not the plan has its own closing question to append.
+    body = strip_trailing_questions(clean_reply(result.text))
     if not body:
         return "", result, ["empty"]
     violations = (

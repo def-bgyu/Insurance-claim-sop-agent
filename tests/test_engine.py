@@ -459,6 +459,79 @@ def test_wrong_name_twice_falls_back_to_a_reply_without_names():
     assert "Margaret" not in switched.reply
 
 
+# --- Regression: "send it to a different email" (live test) --------------------------
+
+TO_WRAP_UP_WITH_HANDOFF = [MARGARET_EXTRACTION, {"confirms_case": "yes"}, {"confirms_case": "yes"}]
+TO_WRAP_UP_TEXT = [MARGARET_OPENING, "Yes", "sure"]
+
+
+def test_regression_different_email_is_not_a_yes_and_is_never_used():
+    state, results, _ = run(
+        TO_WRAP_UP_WITH_HANDOFF + [
+            {"email_consent": "yes", "unsupported_request": "updating your email address"},
+            {"email_consent": "yes"},
+        ],
+        TO_WRAP_UP_TEXT + [
+            "Yes i like that, can u send it to a different email thou? the one on file cant be accessed by me",
+            "ok yes send it there",
+        ],
+        # Even if the model offers to take a new address, it must never reach the caller.
+        reply="I can help with that, Margaret. What's the email address you'd like me to use instead?",
+    )
+    different, final = results[3], results[4]
+    assert different.trace["plan"]["action"] == "email_on_file_only"
+    assert different.trace["state"]["email"]["consent"] is None  # "yes, but elsewhere" isn't consent
+    assert "What's the email address" not in different.reply  # model's question stripped
+    assert different.reply.endswith("to m***@email.com?")
+    # Final turn: code's exact text, no question, transfer happens.
+    assert final.reply == (
+        "I've sent the summary to m***@email.com. I'm connecting you with a human "
+        "representative now. Please hold for a moment."
+    )
+    assert state.phase == Phase.ESCALATED and state.email.consent is True
+
+
+def test_typed_email_not_on_file_is_treated_as_a_change_request():
+    _, results, _ = run(
+        TO_WRAP_UP_WITH_HANDOFF + [{"email_consent": "yes", "email": "maggie.new@gmail.com"}],
+        TO_WRAP_UP_TEXT + ["yes, send it to maggie.new@gmail.com"],
+    )
+    assert results[3].trace["plan"]["action"] == "email_on_file_only"
+
+
+def test_personal_detail_request_without_handoff_offers_a_human_then_back_to_email():
+    state, results, _ = run(
+        [MARGARET_EXTRACTION, {"confirms_case": "yes"}, {"wants_to_end": True},
+         {"unsupported_request": "updating your email address"},
+         {"confirms_case": "no"}, {"confirms_case": "no"}, {"email_consent": "no"}],
+        [MARGARET_OPENING, "yes", "that's all", "send it to my new email instead",
+         "no", "no", "no thanks"],
+    )
+    assert results[3].trace["plan"]["action"] == "offer_human"
+    assert "only send the summary to the email address on file" in results[3].reply
+    assert results[4].trace["plan"]["action"] == "reoffer_human"
+    assert results[5].reply.endswith("to m***@email.com?")  # back to the email question
+    assert state.phase == Phase.ENDED and state.email.consent is False
+
+
+def test_update_request_mid_call_offers_a_human():
+    _, results, _ = run(
+        [MARGARET_EXTRACTION, {"unsupported_request": "updating your phone number"}],
+        [MARGARET_OPENING, "can you update my phone number?"],
+    )
+    assert results[1].trace["plan"]["action"] == "offer_human"
+    assert "not able to help with updating your phone number" in results[1].reply
+
+
+def test_final_messages_are_never_paraphrased():
+    state, results, _ = run(
+        [{"off_topic": True}] * 3, ["What is RL?"] * 3,
+        reply="Sure! Anything else I can do? Maybe tell me about RL?",
+    )
+    assert results[-1].trace["response"]["source"] == "fallback"
+    assert results[-1].reply.endswith("Please hold for a moment.")
+
+
 def test_email_preview_contains_discussion_outcome_and_next_steps():
     state, _, _ = run(
         [MARGARET_EXTRACTION, {"confirms_case": "yes"}, {"wants_to_end": True}],

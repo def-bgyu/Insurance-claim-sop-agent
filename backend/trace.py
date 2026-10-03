@@ -1,9 +1,4 @@
-"""Per-turn execution traces (JSONL, one file per session) and the public state snapshot.
-
-A trace records every step of a turn: extraction (and which parser layer worked),
-state changes, the policy decision and its reasons, the facts the responder was
-allowed to see, and whether the LLM reply or the fallback was sent. PII is masked.
-"""
+#Holding trace of each step in the workflow
 
 import json
 from pathlib import Path
@@ -16,7 +11,7 @@ TRACE_DIR = ROOT_DIR / "traces"
 
 
 def public_snapshot(state: SessionState) -> dict:
-    """What the debug panel shows. Identity values are masked."""
+    #what the debug panel shows
     return {
         "session_id": state.session_id,
         "phase": state.phase.value,
@@ -37,7 +32,7 @@ def public_snapshot(state: SessionState) -> dict:
 
 
 def mask_fields(fields: dict) -> dict:
-    """Mask identity-like values inside an extraction dict."""
+    #Mask identities, dont reveal personal info
     from backend.sop.spec import IdentityField
 
     masked = {}

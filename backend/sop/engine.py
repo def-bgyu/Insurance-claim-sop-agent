@@ -38,6 +38,7 @@ from backend.sop.spec import (
     Phase,
 )
 from backend.sop.state import CaseHints, DiscussedItem, SessionState, Turn
+from backend.sop.normalize import normalize_email
 from backend.sop.verification import normalize_identity_value, verify_identity
 from backend.trace import TraceWriter, mask_fields, public_snapshot
 
@@ -203,6 +204,14 @@ class SOPEngine:
     # --- Cross-cutting guards ----------------------------------------------------------
 
     def _guards(self, state: SessionState, ex: Extraction) -> ResponsePlan | None:
+        # Deterministic backup: an email that isn't on file, typed while we ask about the
+        # summary email, is a request to use a different address, i.e. to change a
+        # personal detail. The summary only ever goes to the address on file.
+        if state.phase == Phase.POST_PROCESS and ex.email and not ex.unsupported_request:
+            on_file = {e.lower() for e in self.data.get_policyholder(state.verified_party_id).all_emails}
+            if (normalize_email(ex.email) or ex.email.lower()) not in on_file:
+                ex.unsupported_request = "updating your email address"
+
         answer = _answer(ex)
         offer_open = state.pending_question == Pending.OFFER_HUMAN
         new_question = bool(ex.intent and ex.intent not in (Intent.UNKNOWN, Intent.SPEAK_TO_HUMAN)) or bool(
@@ -245,6 +254,8 @@ class SOPEngine:
                 reasons=[f"off_topic count {state.counters.off_topic}/{Limits.OFF_TOPIC}"],
             )
 
+        if ex.unsupported_request and state.phase == Phase.POST_PROCESS:
+            return self._email_on_file_only(state, ex)
         if ex.unsupported_request:
             return self._offer_human(
                 state, ex, topic=ex.unsupported_request,
@@ -260,6 +271,38 @@ class SOPEngine:
                 for_request=True,
             )
         return None
+
+    def _email_on_file_only(self, state: SessionState, ex: Extraction) -> ResponsePlan:
+        """During wrap-up the caller asks for something we can't do, usually sending the
+        summary to a different email. Personal details are never changed here; the summary
+        only goes to the address on file; a human can make the change."""
+        request = ex.unsupported_request
+        explain = (
+            "For your security, I can only send the summary to the email address on file, and "
+            "I'm not able to update personal details here."
+            if "email" in request else f"I'm not able to help with {request} here."
+        )
+        directive = (
+            f"{self._tone(ex)}Explain, in your own words: \"{explain}\" Do NOT ask for another "
+            "email address and do not offer to change anything."
+        )
+        if state.handoff_requested:
+            # A transfer is already arranged: the representative can make the change.
+            return ResponsePlan(
+                action="email_on_file_only",
+                directive=directive + " Say the representative they'll be connected to can help with that.",
+                fallback_text=f"{explain} The representative you'll be connected to can help with that.",
+                closing_question=self._email_question(state),
+                pending_question=Pending.OFFER_EMAIL,
+                reasons=[f"personal-detail request during wrap-up: {request}", "handoff already arranged"],
+            )
+        return self._offer_human(
+            state, ex, topic=request,
+            directive=directive + " Say a human representative can help with that.",
+            fallback_text=f"{explain} A human representative can help with that.",
+            reason=f"personal-detail request during wrap-up: {request}",
+            for_request=True,
+        )
 
     # --- Human transfer -----------------------------------------------------------------
     #
@@ -331,6 +374,8 @@ class SOPEngine:
         )
 
     def _after_declined_offer(self, state: SessionState) -> tuple[str, str | None]:
+        if state.phase == Phase.POST_PROCESS:
+            return self._email_question(state), Pending.OFFER_EMAIL
         if state.phase == Phase.VERIFY_ID:
             return self._identity_question(state), None
         if state.phase == Phase.RESOLVE_INTENT and self._claims(state) and not state.discussed:
@@ -374,6 +419,7 @@ class SOPEngine:
             ),
             fallback_text=message,
             reasons=[reason],
+            use_llm=False,  # the last message must state exactly what happens; no paraphrase
         )
 
     def _resume(self, state: SessionState) -> tuple[str, str, str | None]:
@@ -689,6 +735,7 @@ class SOPEngine:
                 ),
                 fallback_text="No problem. You're welcome to contact us anytime. Have a great day.",
                 reasons=["no claims on file; caller is done"],
+                use_llm=False,
             )
 
         asked_about_claim = case_resolution.has_hints(_hints_from(ex)) or bool(
@@ -869,6 +916,7 @@ class SOPEngine:
             ),
             fallback_text=sent + goodbye,
             reasons=[f"email consent={state.email.consent}", f"handoff={state.handoff_requested}"],
+            use_llm=False,  # states exactly where the email went and what happens next
         )
 
     # --- Trace -------------------------------------------------------------------------

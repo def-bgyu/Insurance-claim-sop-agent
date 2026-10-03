@@ -5,6 +5,35 @@ inspected (`git show <commit>`) or rolled back (`git revert <commit>`).
 
 ---
 
+## 0.6.0: Personal details are never changed; final messages are exact
+
+**Found in live testing.** At the email step Margaret said "Yes, can you send it to
+a different email? The one on file can't be accessed by me." The code read "Yes",
+sent the summary to the address on file and transferred her, while Haiku replied
+"What's the email address you'd like me to send the summary to instead?", a
+question in a chat that had already ended, offering something the system can't do.
+
+**Rule (decided by Nidhi):** the agent is never in a position to update personal
+details. Such requests get the human-offer flow, and the summary only ever goes to
+the email address on file.
+
+**Changes**
+1. **Personal-detail requests** (email, phone, address…) are unsupported requests in
+   every phase → offer a human. The extractor prompt and the responder prompt both
+   state the agent cannot change personal details.
+2. **During wrap-up**, "send it to a different email" (or typing an email that isn't
+   on file, a deterministic backup) is **not consent**. The agent explains it can
+   only use the address on file, then:
+   - transfer already arranged → says the representative can help, re-asks the
+     email question;
+   - otherwise → offers a human; if declined twice, returns to the email question.
+3. **Final messages are the code's exact text** (transfers and goodbyes,
+   `use_llm=False`). They must say exactly where the email went and what happens next.
+4. **Model-added questions are removed on every turn**, not just turns where code
+   appends its own question. (This was deferred in 0.5.0.)
+
+---
+
 ## 0.5.0: The agent only uses the verified customer's name
 
 **Found in live testing.** Verified as Ya Wen Li (alias "Yaven Li"), the caller
