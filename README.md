@@ -1,3 +1,5 @@
+
+
 # Insurance Claims SOP Agent
 
 ## The problem
@@ -24,6 +26,8 @@ and phrases replies, and every reply is checked by code before it's sent.
 ## Demo
 
 ▶️ **[Watch the 1-minute demo](docs/media/sop-agent-demo.mp4)**
+
+
 
 Try it live: **https://insurance-claim-sop-agent.onrender.com** (enter your own Anthropic
 API key in the header; on the free tier the first load can take up to a minute).
