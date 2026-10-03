@@ -1,9 +1,10 @@
 """Responder: phrase the code-chosen ResponsePlan as a natural reply.
 
-After generation, a deterministic grounding guard checks the reply: every claim ID,
-dollar amount, and date it mentions must come from the plan's facts. Otherwise the
-plan's fallback text is sent instead. A model can make the reply sound worse, but
-it cannot make it say something ungrounded.
+After generation, deterministic guards check the reply:
+  - grounding: every claim ID, dollar amount, and date must come from the facts;
+  - actions: it may not claim a transfer or email the workflow didn't perform.
+Otherwise the plan's fallback text is sent instead. A model can make the reply
+sound worse, but it cannot make it say something ungrounded or untrue.
 """
 
 import re
@@ -47,6 +48,23 @@ def _date_values(text: str) -> set[str]:
         except (ValueError, OverflowError):
             values.add(m)
     return values
+
+
+# Claims that an action is happening ("I'm connecting you", "I've sent the summary").
+# "Would you like me to connect you?" is an offer, not a claim, and doesn't match.
+_ACTION_CLAIM = re.compile(
+    r"\b(?:transferr?ing you|connecting you|"
+    r"(?:i'm|i am|i'll|i will|let me)\s+(?:now\s+|go ahead and\s+)?(?:transfer|connect|put you through)|"
+    r"(?:i've|i have)\s+(?:sent|emailed)|sending (?:you )?(?:the|an|your) (?:email|summary))",
+    re.IGNORECASE,
+)
+
+
+def action_violations(reply: str, plan: ResponsePlan) -> list[str]:
+    """The model may only describe an action if the code's own reply for this turn does."""
+    if _ACTION_CLAIM.search(reply) and not _ACTION_CLAIM.search(plan.fallback_text):
+        return ["claims an action the workflow did not take"]
+    return []
 
 
 def grounding_violations(reply: str, plan: ResponsePlan) -> list[str]:
@@ -111,7 +129,7 @@ def respond(provider: LLMProvider, state: SessionState, plan: ResponsePlan) -> R
     body = clean_reply(result.text)
     if plan.closing_question:
         body = strip_trailing_questions(body)
-    violations = grounding_violations(body, plan)
+    violations = grounding_violations(body, plan) + action_violations(body, plan)
     if violations or not body:
         return ResponseOutcome(fallback, "fallback", violations or ["empty"], result)
     return ResponseOutcome(_finish(body, plan), "llm", [], result)

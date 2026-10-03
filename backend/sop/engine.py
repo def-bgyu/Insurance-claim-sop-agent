@@ -53,9 +53,14 @@ ESCALATION_MESSAGES = {
 
 ANYTHING_ELSE_QUESTION = "Is there anything else I can help you with?"
 OFFER_HUMAN_QUESTION = (
+    "Would you like me to connect you with a human representative who can help with this?"
+)
+DEADLINE_HUMAN_QUESTION = (
     "Would you like me to connect you with a human claims representative to review your options?"
 )
+REOFFER_HUMAN_QUESTION = "Would you like me to connect you with a representative?"
 WHICH_CLAIM_QUESTION = "Which claim are you calling about?"
+STUCK_REPEATS = 2  # the same question a 3rd time in a row -> offer a human instead
 
 
 @dataclass
@@ -135,6 +140,7 @@ class SOPEngine:
             ex = outcome.extraction
             self._remember(state, ex)
             plan = self._guards(state, ex) or self._phase_plan(state, ex, user_text)
+            plan = self._stuck_check(state, ex, plan)
 
         # Hard invariant: claim facts can never reach the responder before verification.
         if plan.facts and not state.verified:
@@ -174,20 +180,23 @@ class SOPEngine:
     # --- Cross-cutting guards ----------------------------------------------------------
 
     def _guards(self, state: SessionState, ex: Extraction) -> ResponsePlan | None:
+        answer = _answer(ex)
+        offer_open = state.pending_question == Pending.OFFER_HUMAN
+        new_question = bool(ex.intent and ex.intent not in (Intent.UNKNOWN, Intent.SPEAK_TO_HUMAN)) or bool(
+            ex.followup_topic
+        )
+
         wants_human = ex.wants_human or ex.intent == Intent.SPEAK_TO_HUMAN
-        accepts_offer = state.pending_question == Pending.OFFER_HUMAN and _answer(ex) == YesNo.YES
-        if wants_human or accepts_offer:
-            if state.phase == Phase.PROCESS_CASE:
-                # Case is handled: wrap up (offer the email) before transferring.
-                state.handoff_requested = True
-                state.transition(Phase.POST_PROCESS)
-                return self._offer_email(state, ex)
-            if state.phase == Phase.POST_PROCESS:
-                # Already wrapping up: the transfer happens right after the email
-                # question is answered. Never skip that question.
-                state.handoff_requested = True
-            else:
-                return self._escalate(state, "caller_requested_human")
+        if wants_human or (offer_open and answer == YesNo.YES):
+            if plan := self._connect_human(state, ex):
+                return plan
+
+        # "No" to the offer, or insisting the agent do the unsupported thing itself
+        # ("no, I want YOU to do it"). Saying they're done is respected, not re-offered.
+        pushback = bool(ex.unsupported_request) and answer is None and state.human_offer_for_request
+        declined = answer == YesNo.NO or pushback
+        if offer_open and declined and not new_question and not ex.wants_to_end:
+            return self._human_declined(state, ex)
 
         if ex.emotion in _UPSET or ex.refuses_to_share:
             state.counters.frustration += 1
@@ -212,7 +221,123 @@ class SOPEngine:
                 pending_question=pending,
                 reasons=[f"off_topic count {state.counters.off_topic}/{Limits.OFF_TOPIC}"],
             )
+
+        if ex.unsupported_request:
+            return self._offer_human(
+                state, ex, topic=ex.unsupported_request,
+                directive=(
+                    f"Say you're not able to help with {ex.unsupported_request} here, but a human "
+                    "representative can."
+                ),
+                fallback_text=(
+                    f"I'm not able to help with {ex.unsupported_request} here, but a human "
+                    "representative can."
+                ),
+                reason=f"unsupported request: {ex.unsupported_request}",
+                for_request=True,
+            )
         return None
+
+    # --- Human transfer -----------------------------------------------------------------
+    #
+    # Offer -> "yes": connect now (or, if a claim was discussed, offer the email first)
+    #       -> "no":  one gentle re-offer explaining it's the recommended route
+    #                 -> "no" again: stop persuading, ask what else we can help with
+
+    def _connect_human(self, state: SessionState, ex: Extraction) -> ResponsePlan | None:
+        if state.discussed and state.phase in (Phase.PROCESS_CASE, Phase.RESOLVE_INTENT):
+            # A claim was discussed: the email summary is offered before the transfer.
+            state.handoff_requested = True
+            state.transition(Phase.POST_PROCESS)
+            return self._offer_email(state, ex)
+        if state.phase == Phase.POST_PROCESS:
+            # Already wrapping up: transfer right after the email question is answered.
+            state.handoff_requested = True
+            return None
+        return self._escalate(state, "caller_requested_human")
+
+    def _offer_human(
+        self, state: SessionState, ex: Extraction, topic: str, directive: str,
+        fallback_text: str, reason: str, facts: list[str] | None = None,
+        question: str = OFFER_HUMAN_QUESTION, for_request: bool = False,
+    ) -> ResponsePlan:
+        state.human_offer_topic = topic
+        state.human_offer_for_request = for_request
+        state.human_offer_declines = 0
+        return ResponsePlan(
+            action="offer_human",
+            directive=f"{self._tone(ex)}{directive}",
+            fallback_text=fallback_text,
+            facts=facts or [],
+            closing_question=question,
+            pending_question=Pending.OFFER_HUMAN,
+            reasons=[reason],
+        )
+
+    def _human_declined(self, state: SessionState, ex: Extraction) -> ResponsePlan:
+        state.human_offer_declines += 1
+        topic = state.human_offer_topic or "this"
+        if state.human_offer_declines == 1:
+            return ResponsePlan(
+                action="reoffer_human",
+                directive=(
+                    f"{self._tone(ex)}Acknowledge their answer with understanding. Gently explain "
+                    f"that speaking with a human representative is the recommended way to handle "
+                    f"{topic}, because you aren't able to do it here. Do not pressure them."
+                ),
+                fallback_text=(
+                    "I understand. Speaking with a human representative is the recommended way to "
+                    "handle this, since I'm not able to do it here."
+                ),
+                closing_question=REOFFER_HUMAN_QUESTION,
+                pending_question=Pending.OFFER_HUMAN,
+                reasons=["caller declined the human offer once; one re-offer"],
+            )
+
+        # Second "no": respect it and move on.
+        state.human_offer_topic = None
+        state.human_offer_declines = 0
+        question, pending = self._after_declined_offer(state)
+        return ResponsePlan(
+            action="human_offer_declined",
+            directive=f"{self._tone(ex)}Say okay, briefly and warmly. Do not mention the transfer again.",
+            fallback_text="Okay.",
+            closing_question=question,
+            pending_question=pending,
+            reasons=["caller declined the human offer twice; stop offering"],
+        )
+
+    def _after_declined_offer(self, state: SessionState) -> tuple[str, str | None]:
+        if state.phase == Phase.VERIFY_ID:
+            return self._identity_question(state), None
+        if state.phase == Phase.RESOLVE_INTENT and self._claims(state) and not state.discussed:
+            return WHICH_CLAIM_QUESTION, Pending.CHOOSE_CLAIM
+        return ANYTHING_ELSE_QUESTION, Pending.ANYTHING_ELSE
+
+    def _stuck_check(self, state: SessionState, ex: Extraction, plan: ResponsePlan) -> ResponsePlan:
+        """Safety net: if we're about to ask the exact same question a 3rd time in a row,
+        the conversation isn't progressing. Offer a human instead of looping."""
+        repeatable = plan.pending_question in (Pending.OFFER_HUMAN, Pending.OFFER_EMAIL)
+        if plan.closing_question and plan.closing_question == state.last_closing_question and not repeatable:
+            state.repeat_count += 1
+        else:
+            state.repeat_count = 0
+        state.last_closing_question = plan.closing_question
+
+        if state.repeat_count < STUCK_REPEATS:
+            return plan
+        state.repeat_count = 0
+        offer = self._offer_human(
+            state, ex, topic="this",
+            directive=(
+                "Apologize briefly that you don't seem to be able to help with this here, and say "
+                "a human representative can."
+            ),
+            fallback_text="I'm sorry, I don't seem to be able to help with this here, but a human representative can.",
+            reason=f"stuck: same question asked {STUCK_REPEATS + 1} times ({plan.action})",
+        )
+        state.last_closing_question = offer.closing_question
+        return offer
 
     def _escalate(self, state: SessionState, reason: str) -> ResponsePlan:
         state.escalate(reason)
@@ -230,6 +355,8 @@ class SOPEngine:
 
     def _resume(self, state: SessionState) -> tuple[str, str, str | None]:
         """How to steer back after a detour: (topic for the directive, question, pending)."""
+        if state.pending_question == Pending.OFFER_HUMAN:
+            return ("the question you asked.", REOFFER_HUMAN_QUESTION, Pending.OFFER_HUMAN)
         if state.phase == Phase.VERIFY_ID:
             return ("verifying their identity.", self._identity_question(state), None)
         if state.phase == Phase.RESOLVE_INTENT:
@@ -239,8 +366,6 @@ class SOPEngine:
                 return ("their claim.", self._confirm_question(claim), Pending.CONFIRM_CLAIM)
             return ("their claim.", WHICH_CLAIM_QUESTION, Pending.CHOOSE_CLAIM)
         if state.phase == Phase.PROCESS_CASE:
-            if state.pending_question == Pending.OFFER_HUMAN:
-                return ("their claim.", OFFER_HUMAN_QUESTION, Pending.OFFER_HUMAN)
             return ("their claim.", ANYTHING_ELSE_QUESTION, Pending.ANYTHING_ELSE)
         return ("wrapping up.", self._email_question(state), Pending.OFFER_EMAIL)
 
@@ -420,6 +545,9 @@ class SOPEngine:
         opener_text = "Thank you, you're verified." if just_verified else ""
         turn_hints = _hints_from(ex)
 
+        if not claims:
+            return self._no_claims(state, ex, opener, opener_text)
+
         if state.pending_question == Pending.CONFIRM_CLAIM and state.candidate_case_ids:
             candidate = by_id[state.candidate_case_ids[0]]
             # "Yes that one" may come with hints restating the claim; only a contradiction
@@ -473,10 +601,49 @@ class SOPEngine:
         ).strip()
         return plan
 
+    def _no_claims(
+        self, state: SessionState, ex: Extraction, opener: str, opener_text: str
+    ) -> ResponsePlan:
+        """A verified caller with nothing on file. There's nothing to look up and nothing
+        to summarize by email, so: offer a human, and close when they're done."""
+        done = ex.wants_to_end or (
+            state.pending_question == Pending.ANYTHING_ELSE and _answer(ex) == YesNo.NO
+        )
+        if done:
+            state.transition(Phase.ENDED)
+            return ResponsePlan(
+                action="close",
+                directive=(
+                    "Say that's no problem, they're welcome to contact us anytime, and say "
+                    "goodbye. Do not ask any question."
+                ),
+                fallback_text="No problem. You're welcome to contact us anytime. Have a great day.",
+                reasons=["no claims on file; caller is done"],
+            )
+        asked = (
+            f"Acknowledge they asked about their {_describe_hints(state.hints)}. "
+            if case_resolution.has_hints(state.hints) else ""
+        )
+        return self._offer_human(
+            state, ex, topic="questions about claims that aren't on file",
+            directive=(
+                f"{opener}{asked}Tell them there are no claims on file for their account, so there "
+                "are no claim details to look up. Do not suggest that any claim exists. Say a human "
+                "representative can help with anything else, such as starting a new claim."
+            ),
+            fallback_text=(
+                f"{opener_text} I don't see any claims on file for your account. A human "
+                "representative can help with anything else, such as starting a new claim."
+            ).strip(),
+            facts=["The caller's account has no claims on file."],
+            reason="verified caller has no claims on file",
+        )
+
     def _list_claims(
         self, state: SessionState, claims: list[Claim], ex: Extraction, opener: str,
         opener_text: str, action: str,
     ) -> ResponsePlan:
+        assert claims, "_list_claims needs at least one claim; see _no_claims"
         claims = sorted(claims, key=lambda c: c.created_at, reverse=True)
         state.candidate_case_ids = [c.case_id for c in claims]
         labels = [case_resolution.describe_claim(c) for c in claims]
@@ -510,20 +677,6 @@ class SOPEngine:
                 state.transition(Phase.POST_PROCESS)
                 return self._offer_email(state, ex)
 
-            if (
-                state.pending_question == Pending.OFFER_HUMAN
-                and _answer(ex) == YesNo.NO
-                and not new_question
-            ):
-                return ResponsePlan(
-                    action="decline_human",
-                    directive=f"{self._tone(ex)}Say that's no problem.",
-                    fallback_text="No problem.",
-                    closing_question=ANYTHING_ELSE_QUESTION,
-                    pending_question=Pending.ANYTHING_ELSE,
-                    reasons=["caller declined the human transfer"],
-                )
-
             turn_hints = _hints_from(ex)
             switching = (turn_hints.case_id and turn_hints.case_id != claim.case_id) or (
                 turn_hints.case_type and turn_hints.case_type != claim.case_type
@@ -552,7 +705,10 @@ class SOPEngine:
                 "Explain that, according to the records, the appeal deadline has passed, so a "
                 "human claims representative needs to review their options. "
             )
-            closing, pending = OFFER_HUMAN_QUESTION, Pending.OFFER_HUMAN
+            closing, pending = DEADLINE_HUMAN_QUESTION, Pending.OFFER_HUMAN
+            state.human_offer_topic = "a claim whose appeal deadline has passed"
+            state.human_offer_for_request = False
+            state.human_offer_declines = 0
 
         return ResponsePlan(
             action="answer_case",

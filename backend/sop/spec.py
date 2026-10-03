@@ -19,7 +19,9 @@ class Phase(StrEnum):
 # Phases can only move along these edges. Any phase may escalate to a human.
 ALLOWED_TRANSITIONS: dict[Phase, set[Phase]] = {
     Phase.VERIFY_ID: {Phase.RESOLVE_INTENT, Phase.ESCALATED},
-    Phase.RESOLVE_INTENT: {Phase.PROCESS_CASE, Phase.ESCALATED},
+    # POST_PROCESS: a claim was already discussed and the caller accepts a human transfer
+    # (email summary first). ENDED: no claims on file and the caller is done.
+    Phase.RESOLVE_INTENT: {Phase.PROCESS_CASE, Phase.POST_PROCESS, Phase.ESCALATED, Phase.ENDED},
     # A caller may ask about a second claim, which sends us back to RESOLVE_INTENT.
     Phase.PROCESS_CASE: {Phase.POST_PROCESS, Phase.RESOLVE_INTENT, Phase.ESCALATED},
     Phase.POST_PROCESS: {Phase.ENDED, Phase.ESCALATED},

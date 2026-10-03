@@ -5,6 +5,51 @@ inspected (`git show <commit>`) or rolled back (`git revert <commit>`).
 
 ---
 
+## 0.3.0: Human-transfer flow, no-claims callers, action guard, loop safety net
+
+**Bug found in live testing (Ava Lopez, who has no claims).** After verification
+the agent said "I can see you have claims on your account" and then asked "Which
+claim are you calling about?" every turn, forever. When Ava asked to file a new
+claim, Haiku repeatedly said "I'm connecting you to our claims filing team", but
+no transfer happened, because only code can transfer.
+
+**Root causes:** (a) no path for a verified caller with zero claims (the code
+listed an empty claim list); (b) the responder could describe actions the code
+never took; (c) no path for in-scope-but-unsupported requests; (d) nothing
+detected a conversation going in circles.
+
+**Changes**
+1. **One reusable "offer a human" flow** (designed with Nidhi):
+   offer ("I can't help with X here, but a human representative can. Would you
+   like me to connect you?") → on "no", **one** gentle re-offer explaining it's the
+   recommended route → on a second "no", stop persuading and ask "Is there
+   anything else I can help you with?". Insisting "no, I want *you* to do it"
+   counts as a "no". Saying "that's all" is respected and never re-offered.
+   - On "yes" with **nothing discussed yet** → connect immediately, chat ends.
+   - On "yes" **after a claim was discussed** → offer the email summary first,
+     then connect (POST_PROCESS requirement). New transition
+     `RESOLVE_INTENT → POST_PROCESS` for this.
+   - Used by: unsupported requests, no claims on file, appeal deadline passed,
+     and the stuck-loop safety net.
+2. **No claims on file:** said plainly, offer a human; "no" to "anything else?"
+   ends the chat (new transition `RESOLVE_INTENT → ENDED`). No email offered:
+   nothing to summarize.
+3. **Unsupported requests:** new extractor field `unsupported_request` (e.g.
+   "filing a new claim", "changing your policy"). The agent names what it can't do
+   and offers a human. A new, different request gets its own offer.
+4. **Action guard** (`responder.action_violations`): if the reply claims a
+   transfer/connection/email ("I'm connecting you", "I've sent…") that the code's
+   own reply for this turn doesn't contain, the safe fallback is sent instead.
+   The prompt also says this explicitly.
+5. **Stuck-loop safety net:** the same closing question a 3rd time in a row →
+   offer a human instead. (Human and email offers are exempt; they have their
+   own limits.)
+
+Tests: regression tests replay the Ava conversation; plus both "yes" paths, the
+two-decline flow, the action guard, and the loop detector (83 total).
+
+---
+
 ## 0.2.0: Yes/no answers are always matched to the question actually asked
 
 **Bug found in live testing (Haiku 4.5, trace `9c405e18…`).** The caller picked a

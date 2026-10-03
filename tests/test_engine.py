@@ -253,13 +253,16 @@ def test_explicit_human_request_during_wrap_up_still_asks_email_first():
     assert state.phase == Phase.ESCALATED and state.email.consent is False
 
 
-def test_declining_the_human_offer_continues_normally():
+def test_declining_the_human_offer_twice_continues_normally():
     state, results, _ = run(
-        [MARGARET_EXTRACTION, {"confirms_case": "yes"}, {"confirms_case": "no"}, {"confirms_case": "no"}],
-        [MARGARET_OPENING, "yes", "no thanks", "no"],
+        [MARGARET_EXTRACTION, {"confirms_case": "yes"}, {"confirms_case": "no"},
+         {"confirms_case": "no"}, {"confirms_case": "no"}],
+        [MARGARET_OPENING, "yes", "no thanks", "no", "no"],
     )
-    assert results[2].trace["plan"]["action"] == "decline_human"
-    assert results[3].trace["phase_after"] == "POST_PROCESS"  # "no" to "anything else?"
+    assert results[2].trace["plan"]["action"] == "reoffer_human"  # one gentle re-offer
+    assert results[3].trace["plan"]["action"] == "human_offer_declined"
+    assert results[3].reply.endswith("Is there anything else I can help you with?")
+    assert results[4].trace["phase_after"] == "POST_PROCESS"  # "no" to "anything else?"
     assert not state.handoff_requested
 
 
@@ -272,6 +275,87 @@ def test_model_cannot_add_its_own_question():
     reply = results[0].reply
     assert reply.count("?") == 1 and reply.endswith("(status: denied)?")
     assert results[0].trace["response"]["source"] == "llm"
+
+
+# --- Regression: verified caller with no claims, new-claim request (live test) -------
+
+AVA = {"full_name": "Ava Martinez Lopez", "dob": "1990-08-21", "id_last4": "9180", "email": "ava.lopez@email.com"}
+AVA_TEXT = "Ava Martinez Lopez, 1990 21st august, 9180, ava.lopez@email.com"
+
+
+def test_regression_no_claims_on_file_is_said_plainly():
+    state, results, _ = run([AVA, {"case_type": "healthcare"}], [AVA_TEXT, "my healthcare claim"])
+    for r in results:
+        assert r.trace["plan"]["action"] == "offer_human"
+        assert "don't see any claims" in r.reply and "these claims" not in r.reply
+        assert "Which claim" not in r.reply
+    assert state.verified and state.pending_question == "offer_human"
+
+
+def test_regression_new_claim_request_flow_from_the_conversation():
+    # Your example: offer -> "no I want you to do it" -> re-offer -> "NO" -> anything else.
+    state, results, _ = run(
+        [
+            AVA,
+            {"unsupported_request": "filing a new claim", "case_type": "healthcare"},
+            {"unsupported_request": "filing a new claim", "confirms_case": "no"},
+            {"confirms_case": "no"},
+            {"confirms_case": "no"},
+        ],
+        [AVA_TEXT, "I want to file a new healthcare claim", "no I want you to do it", "NO", "no"],
+    )
+    offer, reoffer, declined, close = results[1:]
+    assert offer.trace["plan"]["action"] == "offer_human"
+    assert "not able to help with filing a new claim" in offer.reply
+    assert reoffer.trace["plan"]["action"] == "reoffer_human"
+    assert "recommended way" in reoffer.reply
+    assert declined.reply.endswith("Is there anything else I can help you with?")
+    assert close.trace["plan"]["action"] == "close" and state.phase == Phase.ENDED
+
+
+def test_accepting_human_with_nothing_discussed_connects_immediately():
+    state, results, _ = run(
+        [AVA, {"unsupported_request": "filing a new claim"}, {"confirms_case": "yes"}],
+        [AVA_TEXT, "I want to file a new claim", "Yes, connect me to one"],
+    )
+    assert state.phase == Phase.ESCALATED and not state.email.offered
+    assert "connecting you" in results[-1].reply
+
+
+def test_accepting_human_after_a_claim_was_discussed_offers_email_first():
+    state, results, _ = run(
+        [MARGARET_EXTRACTION, {"confirms_case": "yes"}, {"confirms_case": "yes"}, {"email_consent": "yes"}],
+        [MARGARET_OPENING, "yes", "yes connect me", "yes send it"],
+    )
+    assert results[2].trace["plan"]["action"] == "offer_email"
+    assert "connect you with a human representative right after" in results[2].reply
+    assert state.phase == Phase.ESCALATED and state.email.consent is True
+
+
+def test_unsupported_request_before_verification_reveals_nothing():
+    state, results, _ = run([{"unsupported_request": "filing a new claim"}], ["I want to file a new claim"])
+    assert results[0].trace["plan"]["action"] == "offer_human"
+    assert_no_claim_data_before_verification(results)
+
+
+def test_regression_model_cannot_claim_a_transfer_that_did_not_happen():
+    state, results, _ = run(
+        [AVA, {"case_type": "healthcare"}],
+        [AVA_TEXT, "my healthcare claim"],
+        reply="I'm connecting you now to our claims filing team. One moment.",
+    )
+    r = results[1]
+    assert r.trace["response"]["source"] == "fallback"
+    assert "claims an action the workflow did not take" in r.trace["response"]["guard_violations"]
+    assert state.phase == Phase.RESOLVE_INTENT  # nothing was transferred
+
+
+def test_stuck_loop_offers_a_human_instead_of_repeating():
+    # A caller who keeps answering without giving anything usable.
+    state, results, _ = run([{}, {}, {}], ["hmm", "what", "ok"])
+    asks = [r.trace["plan"]["action"] for r in results]
+    assert asks == ["ask_identity", "ask_identity", "offer_human"]
+    assert "stuck" in results[2].trace["plan"]["reasons"][0]
 
 
 def test_email_preview_contains_discussion_outcome_and_next_steps():

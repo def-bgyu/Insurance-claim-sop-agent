@@ -76,6 +76,7 @@ class Extraction(BaseModel):
     email_consent: YesNo | None = None
     emotion: Emotion = Emotion.NEUTRAL
     refuses_to_share: bool = False
+    unsupported_request: str | None = None  # e.g. "filing a new claim"
     off_topic: bool = False
     wants_human: bool = False
     wants_to_end: bool = False
@@ -116,7 +117,7 @@ class Extraction(BaseModel):
 
     @field_validator(
         "full_name", "dob", "phone", "email", "id_last4", "representative_name",
-        "followup_topic", mode="before",
+        "followup_topic", "unsupported_request", mode="before",
     )
     @classmethod
     def _blank_to_none(cls, v: Any):

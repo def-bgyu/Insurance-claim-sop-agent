@@ -82,6 +82,16 @@ class SessionState(BaseModel):
     discussed: list[DiscussedItem] = Field(default_factory=list)
     handoff_requested: bool = False  # caller wants a human after their case was handled
 
+    # Human-transfer offer: what it's for, and how many times the caller said no.
+    # One "no" gets one gentle re-offer; a second "no" ends the persuasion.
+    human_offer_topic: str | None = None
+    human_offer_for_request: bool = False  # offer was made for a request we can't handle
+    human_offer_declines: int = 0
+
+    # Stuck-loop detection: the same closing question asked turn after turn.
+    last_closing_question: str | None = None
+    repeat_count: int = 0
+
     counters: Counters = Field(default_factory=Counters)
     email: EmailState = Field(default_factory=EmailState)
     escalation_reason: str | None = None
